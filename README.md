@@ -8,24 +8,30 @@ over both from the CLI.
 
 ## How it works
 
+Three independent, idempotent pipelines around one canonical store:
+
 ```
-IMAP (SINCE cutoff) ─┐                          ┌─► Qdrant (vectors)
-                     ├─► dedup gate ─► insert ──┤
-notes/*.md ──────────┘   (docstore)  (PropertyGraphIndex)
-                                                └─► SimplePropertyGraphStore (triples)
-                                                          │
-                                              as_chat_engine(condense_plus_context)
-                                                          │
-                                                     CLI chat REPL
+ sources          1. extract          2. embed
+ IMAP  ──┐                          ┌────────────► Qdrant (vectors)
+ notes ──┴──►  Document Store  ─────┤
+              (SQLite documents.db) └────────────► Kùzu graph (graph.kuzu)
+                                       3. graph
+                        │
+                        └── chat (condense_plus_context) + viewer read Qdrant + Kùzu
 ```
 
-- **Incremental.** A docstore-backed `IngestionPipeline` (UPSERTS) compares content
-  hashes and only lets new/changed documents through, so re-running is cheap and
-  cron-safe. Stable IDs: absolute file path for notes, `Message-ID` for mail.
-- **Email cutoff.** Only mail newer than the configured date/age is fetched
-  (server-side IMAP `SINCE`), so old mail is never downloaded.
-- **Any OpenAI-compatible endpoint** for chat + embeddings (Ollama, LM Studio,
-  vLLM, llama.cpp, or a hosted gateway).
+- **Document Store is the source of truth.** `extract` scans sources and writes
+  documents; `embed` and `graph` are pure functions of the Document Store — each
+  diffs its own ledger against it (by content hash) to add / update / **delete**.
+- **Deletion works.** Remove a note or let mail age past the cutoff → `extract`
+  drops it from the Document Store, and `embed`/`graph` remove its vectors/graph
+  data on their next run.
+- **Incremental & crash-safe.** Every pipeline detects only new/changed/deleted
+  work and commits per document.
+- **Stable IDs.** `doc_id = "{extractor}:{local_id}"` — notes: file path;
+  email: `Message-ID` (uid fallback).
+- **Email cutoff.** Server-side IMAP `SINCE`; old mail never downloaded.
+- **Any OpenAI-compatible endpoint** for chat + embeddings.
 
 ## Requirements
 
@@ -64,34 +70,38 @@ group/other-readable).
 ## Usage
 
 ```sh
-make ingest    # incremental ingest — safe to re-run / cron
+make sync      # run all three pipelines: extract -> embed -> graph
 make chat      # interactive Q&A REPL
+make view      # browse the stores in a local web app
 ```
 
-Or directly:
+Or a single pipeline at a time (each independently re-runnable):
 
 ```sh
-.venv/bin/python -m rag.ingest
-.venv/bin/python -m rag.chat
+.venv/bin/python -m rag.extract [--only email|notes]   # sources -> Document Store
+.venv/bin/python -m rag.embed   [--delay N]            # Document Store -> Qdrant
+.venv/bin/python -m rag.graph   [--delay N]            # Document Store -> Kùzu graph
+.venv/bin/python -m rag.chat    [--trace]
+.venv/bin/python -m rag.viewer  [--reload]
 ```
 
 In the chat REPL: ask questions; `/reset` clears history; `/exit` (or Ctrl-D) quits.
+`--trace` prints every store round-trip (vector query → Qdrant, synonym query →
+graph) with the query and returned nodes — not the LLM's own thinking.
 
-- `rag.chat --trace` — print every store round-trip (vector query → Qdrant,
-  synonym query → graph) with the query and returned nodes, abbreviated. The LLM's
-  own condensing/answering is not traced — only what hits the databases.
-- `rag.ingest --verbose --delay=N` — per-item progress; pause `N`s between
-  items to throttle the endpoint.
-
-## Inspecting the stores
+## Inspecting the stores — the viewer
 
 ```sh
-make inspect      # writes inspect.html — one self-contained report
+make view      # http://127.0.0.1:5000  (auto-reloads on source edits)
 ```
 
-Opens as a single page with the property graph (interactive), a sample of Qdrant
-points (full text + payload, foldable), and the docstore dedup table. Embedded
-Qdrant (`path:`) has no web dashboard; this report is how you see its contents.
+A small Flask app that browses **one item at a time** — a document, entity,
+relation, or chunk — with all properties in a table, references rendered as
+clickable links, in/out relations, a back button, and a history panel. A search
+box takes a text query (ranked graph matches) or a pasted id (jumps to the item),
+with an optional **semantic** checkbox for a Qdrant vector search. Notes link out
+to Obsidian (`obsidian://`), emails to `mid:`. Embedded Qdrant/Kùzu have no
+dashboards of their own; this viewer is how you see their contents.
 
 ## Configuration reference
 
@@ -108,7 +118,7 @@ Qdrant (`path:`) has no web dashboard; this report is how you see its contents.
 | `qdrant` | `path` **or** `url` (exactly one), `collection` | embedded dir or running server |
 | `graph` | `llm_extraction` | one LLM call per chunk when on — the cost driver |
 | | `max_triplets_per_chunk` | |
-| `storage` | `dir` | `docstore.json` + `property_graph_store.json` |
+| `storage` | `dir` | `documents.db` + `qdrant/` + `graph.kuzu/` |
 | `chunking` | `chunk_size`, `chunk_overlap` | |
 
 ## Development
@@ -118,7 +128,8 @@ make test      # run the unit suite (no network; mocks + temp dirs)
 make clean     # remove caches; make clean-storage to drop the index
 ```
 
-The suite covers config/secret resolution (files, keyring, prompt), the dedup gate,
+The suite covers config/secret resolution (files, keyring, prompt), the Document
+Store (dedup, reconcile-deletion, ledgers, change planning), extraction,
 email ID assignment, store roundtrips, and the embedding-dimension guard.
 
 ## Notes & limits (prototype scope)

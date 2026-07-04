@@ -1,0 +1,38 @@
+# Human descriptions for item properties, shown as tooltips in the viewer.
+# Structure: <kind>: { <property>: <description> }. Kinds: chunk, entity,
+# relation, document. A `common:` section applies to every kind; a kind-specific
+# entry overrides it. A project-local ./properties.yaml overrides this bundled one.
+
+common:
+  file_path: Absolute path to the source file on disk (ingested from here).
+  file_name: Name of the source file.
+  file_type: MIME type of the source file (e.g. text/markdown).
+  file_size: Size of the source file in bytes.
+  creation_date: Date the source file was created, as seen at ingest time.
+  last_modified_date: Date the source file was last modified, as seen at ingest time.
+  triplet_source_id: ID of the chunk this fact was extracted from (click to open it).
+  _node_content: >-
+    Full serialized LlamaIndex node — its id, metadata, text and relationships —
+    stored as JSON. This is the raw record the retrievers return.
+  _node_type: LlamaIndex node class for this record (e.g. TextNode).
+  document_id: ID of the source document this node came from — for email, the Message-ID.
+  doc_id: Same as document_id — ID of the source document (email Message-ID / note path).
+  ref_doc_id: ID of the source document this node was derived from (email Message-ID / note path).
+  # Email-specific metadata (from the IMAP reader).
+  uid: IMAP UID of the source email within its folder (per-folder, not globally stable).
+  subject: Subject line of the source email.
+  from_: Sender address of the source email.
+  date: Date and time the source email was sent (ISO 8601).
+
+chunk:
+  _node_content: >-
+    The complete chunk node as JSON (id, metadata, text, relationships). The
+    rendered Text section above is the human-readable view of its text.
+
+entity:
+  triplet_source_id: The chunk from which this entity was extracted.
+
+relation:
+  triplet_source_id: The chunk from which this relation (triple) was extracted.
+
+document: {}

@@ -28,11 +28,23 @@ install: $(PY) ## Create the venv and install deps (incl. test extra)
 test: install ## Run the unit test suite
 	$(PY) -m pytest
 
-INGEST_ARGS ?= --verbose --delay=60
+PIPE_ARGS ?= --verbose
 
-.PHONY: ingest
-ingest: install ## Incremental ingest (safe to re-run / cron)
-	$(PY) -m rag.ingest $(INGEST_ARGS)
+.PHONY: extract
+extract: install ## Pipeline 1: sources -> Document Store
+	$(PY) -m rag.extract $(PIPE_ARGS)
+
+.PHONY: embed
+embed: install ## Pipeline 2: Document Store -> Qdrant vectors
+	$(PY) -m rag.embed $(PIPE_ARGS)
+
+.PHONY: graph
+graph: install ## Pipeline 3: Document Store -> Kùzu property graph
+	$(PY) -m rag.graph $(PIPE_ARGS)
+
+.PHONY: sync
+sync: install ## Run all three pipelines: extract -> embed -> graph
+	$(PY) -m rag.sync $(PIPE_ARGS)
 
 .PHONY: chat
 chat: install ## Start the interactive chat REPL

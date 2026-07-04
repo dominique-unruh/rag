@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
 
-from rag import chat, trace
+from rag import chat
+from rag.chat import trace
 
 
 def _make_sub(clsname, nodes):

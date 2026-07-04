@@ -48,7 +48,7 @@ graph:
   max_triplets_per_chunk: 8
 
 storage:
-  dir: ./storage                        # docstore.json + property_graph_store.json live here.
+  dir: ./storage                        # documents.db + qdrant/ + graph.kuzu/ live here.
 
 chunking:
   chunk_size: 1024
