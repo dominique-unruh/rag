@@ -1,0 +1,8 @@
+config.yaml
+storage/
+.venv/
+__pycache__/
+*.pyc
+.uv/
+uv.lock
+.pytest_cache/

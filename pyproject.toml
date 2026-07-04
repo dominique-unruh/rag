@@ -1,0 +1,32 @@
+[project]
+name = "rag"
+version = "0.1.0"
+description = "Local RAG prototype over IMAP email + Markdown notes, wired from stock LlamaIndex components."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "llama-index-core",
+    "llama-index-readers-imap",
+    "llama-index-vector-stores-qdrant",
+    "llama-index-llms-openai-like",
+    "llama-index-embeddings-openai-like",
+    "qdrant-client",
+    "pyyaml",
+    "keyring",
+    "flask",
+    "markdown",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["rag"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

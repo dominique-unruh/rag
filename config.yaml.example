@@ -1,0 +1,55 @@
+# ragproto configuration. Copy to config.yaml and edit.
+# No secrets file: credentials are resolved from external files and/or the
+# desktop keyring (see the api_key / password notes below).
+
+models:
+  # Any OpenAI-compatible endpoint: Ollama, LM Studio, vLLM, llama.cpp server, hosted.
+  api_base: http://localhost:11434/v1
+  chat_model: qwen2.5:14b
+  temperature: 0.1                      # low = factual/grounded RAG answers.
+  embed_model: nomic-embed-text
+  embed_dim: 768                        # MUST match the embed model's output dim.
+                                        # Changing it later requires a fresh Qdrant collection.
+  # API key resolution order: inline `api_key` -> `api_key_file` -> desktop keyring
+  # (service "ragproto", user "api_key@<api_base>") -> interactive prompt (stored to
+  # keyring). Local servers: keep `api_key: none`. Hosted: omit both lines to be
+  # prompted once and cached in the keyring, or point api_key_file at a 0600 file.
+  api_key: none
+  # api_key_file: ~/.config/ragproto/openai.key
+
+email:
+  enabled: true
+  host: imap.example.org
+  username: me@example.org
+  folder: INBOX
+  since_days: 180                       # only fetch mail newer than N days (server-side SINCE).
+  # since_date: 2025-01-01              # ... or a fixed date. If set, overrides since_days.
+  # Password resolution order:
+  #   1. inline `password` here (not recommended),
+  #   2. `password_file` below,
+  #   3. desktop keyring (service "ragproto", user = the imap username),
+  #   4. interactive prompt — the entered value is saved to the keyring for next time.
+  # password: "app-password-here"
+  # password_file: ~/.config/ragproto/imap.pass
+
+notes:
+  enabled: true
+  directory: ~/notes                    # recursive, *.md only, path used as stable doc id.
+
+qdrant:
+  # Provide exactly one of `path` (embedded local) or `url` (running server).
+  path: ./storage/qdrant
+  # url: http://localhost:6333
+  collection: personal_rag
+
+graph:
+  llm_extraction: true                  # SimpleLLMPathExtractor on/off. Off = cheap, structural edges only.
+                                        # One LLM call per chunk when on — the main cost driver.
+  max_triplets_per_chunk: 8
+
+storage:
+  dir: ./storage                        # docstore.json + property_graph_store.json live here.
+
+chunking:
+  chunk_size: 1024
+  chunk_overlap: 64
