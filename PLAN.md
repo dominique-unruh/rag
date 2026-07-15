@@ -41,7 +41,7 @@ ones.
 | Vector store       | **Qdrant (embedded, local path)** | Same family as prototype, good metadata filtering. Single-process lock — see §9 for the concurrency policy. |
 | LLM / embeddings   | **OpenAI-compatible endpoint**  | Works with local (Ollama / LM Studio / vLLM / llama.cpp) or hosted. |
 | Config             | **Central YAML** file           | Everything except secrets. |
-| Secrets            | **Desktop keyring** (+ file/env fallback) | No secrets in the YAML or repo. |
+| Secrets            | **Desktop keyring** (+ file fallback)   | No secrets in the YAML or repo. |
 
 SQLite WAL settings: `PRAGMA journal_mode=WAL;` once at DB creation, plus a
 per-connection `PRAGMA busy_timeout=<ms>;` so a blocked writer waits instead of
@@ -233,7 +233,7 @@ class Extractor(ABC):
         (host, folder, filters, …) live there.
 
         `secrets` is the same secret-resolution mechanism the main program uses
-        (desktop keyring + file/env fallback, §10) — so a plugin fetches its
+        (desktop keyring + file fallback, §10) — so a plugin fetches its
         passwords / API keys exactly the way the core does, rather than reading
         them from `config`. Secrets never live in the YAML.
 
@@ -552,10 +552,10 @@ content-addressed, are safe to back up incrementally at any time.
 
 - **Config**: a single central YAML file holds everything except secrets
   (endpoints, model names, chunking, storage paths, per-source settings, …).
-  Each extraction plugin has its **own subtree** (keyed by its `source_type`,
-  e.g. under `plugins:` / `extract:`); the framework hands a plugin just that
-  subtree (§4.1), so plugins never parse the global file or see unrelated keys.
-- **Secrets**: resolved from the desktop keyring, with file/env fallback for
+  Each extractor has its **own subtree** (keyed by its `source_type`, under the
+  top-level `extractors:` map); the framework hands a plugin just that subtree
+  (§4.1), so plugins never parse the global file or see unrelated keys.
+- **Secrets**: resolved from the desktop keyring, with a file fallback for
   headless use. No secret ever lives in the YAML or the repo. Plugins use the
   **same secret-resolution mechanism** as the core (passed into `run`, §4.1),
   not the config.

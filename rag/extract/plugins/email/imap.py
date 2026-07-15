@@ -41,17 +41,21 @@ _IMAP_MONTHS: tuple[str, ...] = (
 def _password(secrets: Secrets, account: Mapping[str, Any]) -> str:
     """Resolve the IMAP password for ``account`` via the shared secret resolver.
 
-    Uses the account's username as the keyring key and an
-    ``RAG_IMAP_PASSWORD_<ACCOUNTID>`` environment-variable fallback.
+    The keyring key is ``imap:<host>:<username>`` — the actual credential
+    identity. Keying by host + username (rather than username alone) disambiguates
+    accounts that share a username across different servers, and stays stable if
+    the ``account-id`` is later renamed. Falls back to an interactive prompt
+    cached to the keyring.
     """
     account_id = str(account["account-id"])
+    host = str(account["host"])
     username = str(account.get("username", account_id))
-    # Sanitise the account id into a valid, upper-case env-var suffix.
-    env_suffix = re.sub(r"[^A-Za-z0-9]", "_", account_id).upper()
+    # Composite, server-scoped key so same-username/different-server accounts
+    # never share a password entry.
+    key = f"imap:{host}:{username}"
     return secrets.get(
-        username,
-        env=f"RAG_IMAP_PASSWORD_{env_suffix}",
-        prompt_text=f"IMAP password for {username} ({account_id}): ",
+        key,
+        prompt_text=f"IMAP password for {username} at {host} ({account_id}): ",
     )
 
 
@@ -242,6 +246,8 @@ def extract_account(
     account_id = str(account["account-id"])
     since, until, count = _parse_options(options)
     folder_option = str(options["folder"]) if options.get("folder") else None
+    # Verbose: print a one-liner per extracted/deleted message.
+    verbose = bool(options.get("verbose"))
 
     # Resolve credentials and connect.
     password = _password(secrets, account)
@@ -266,6 +272,7 @@ def extract_account(
                 since=since,
                 until=until,
                 remaining=remaining,
+                verbose=verbose,
             )
             # Persist after each folder so partial progress survives a crash.
             _save_state(state_path, state)
@@ -291,11 +298,13 @@ def _sync_folder(
     since: datetime | None,
     until: datetime | None,
     remaining: int | None,
+    verbose: bool = False,
 ) -> int | None:
     """Reconcile a single ``folder``; return the updated fetch ``remaining`` budget.
 
     Handles UIDVALIDITY changes (resync), deletion detection and bounded fetching
-    of new-then-known messages, updating ``state`` in place.
+    of new-then-known messages, updating ``state`` in place. When ``verbose``,
+    prints a one-liner per deleted and per extracted message.
     """
     from . import build_stable_metadata, build_transient_metadata  # avoid import cycle
 
@@ -320,6 +329,9 @@ def _sync_folder(
             if int(uid_str) not in all_uids:
                 store.delete(doc_id)
                 del known[uid_str]
+                if verbose:
+                    # Say what we just did — deleted a vanished message.
+                    print(f"deleted   {doc_id}")
 
     # Candidate UIDs to (re)fetch, filtered by the date window.
     candidates = _search_uids(client, since=since, until=until)
@@ -341,8 +353,17 @@ def _sync_folder(
         # (exist_ok default True); an unchanged body just refreshes transient.
         stable = build_stable_metadata(parsed, account_id)
         transient = build_transient_metadata(folder, read=is_read)
-        store.upsert(doc_id, raw, stable, transient=transient)
+        result = store.upsert(doc_id, raw, stable, transient=transient)
         known[str(uid)] = doc_id
+        if verbose:
+            # Format the message date as DD-Mon-YYYY (empty/unparseable -> "?").
+            date_iso = stable["date"]
+            try:
+                date_str = _imap_date(datetime.fromisoformat(date_iso)) if date_iso else "?"
+            except ValueError:
+                date_str = "?"
+            # One line per item: what happened + date + id + subject.
+            print(f"{result.status.value:9} {date_str:>11} {doc_id}  {stable['subject']}")
         if remaining is not None:
             remaining -= 1
 

@@ -16,7 +16,7 @@ pip install -e .[test]
 
 ```sh
 cp config.yaml.example config.yaml
-# edit config.yaml; secrets go in the OS keyring / env, never the YAML
+# edit config.yaml; secrets go in the OS keyring (or a file), never the YAML
 ```
 
 ## Extract

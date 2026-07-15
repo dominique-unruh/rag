@@ -29,6 +29,7 @@ from .imap import extract_account
 # MIME type recorded for the raw email blobs.
 _EMAIL_MIME: str = "message/rfc822"
 
+# TODO: use existing email library, don't implement own parsers (e.g., _decode_mime_words).
 
 def _decode_mime_words(raw: str | None) -> str:
     """Decode RFC 2047 encoded-word header text into a plain Unicode string.
@@ -113,6 +114,8 @@ def build_transient_metadata(folder: str, *, read: bool) -> dict[str, Any]:
     ``folder`` is where the message currently lives; ``read`` reflects the
     ``\\Seen`` flag. Changing either updates the row without bumping the version.
     """
+    # TODO: add IMAP UID
+    # TODO: add other IMAP flags (starred? important?), not sure which ones there are.
     return {"folder": folder, "read": read}
 
 

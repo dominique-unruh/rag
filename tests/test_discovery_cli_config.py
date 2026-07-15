@@ -32,7 +32,7 @@ def test_config_storage_dir_and_plugin_subtree(tmp_path: Path) -> None:
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(
         "storage:\n  dir: ./data\n"
-        "plugins:\n  email:\n    host: imap.example.org\n"
+        "extractors:\n  email:\n    host: imap.example.org\n"
     )
     config = Config.load(cfg_path)
     # Relative storage dir is resolved against the config file's directory.

@@ -44,6 +44,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--config", default=_DEFAULT_CONFIG, type=Path,
         help="path to the YAML config file (default: %(default)s)",
     )
+    # Global verbose flag: plugins print a one-liner per item when set.
+    parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="print a line for each extracted item",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # --- extract subcommand ----------------------------------------------
@@ -60,8 +65,10 @@ def _cmd_extract(args: argparse.Namespace) -> None:
     """Handle ``rag extract`` — load config and run the chosen plugin."""
     config = Config.load(args.config)
     # Convert the raw key=value tokens into the plugin options mapping.
-    options = _parse_kv_options(args.options)
-    run_extraction(args.source_type, dict(options), config)
+    options: dict[str, object] = dict(_parse_kv_options(args.options))
+    # Pass the verbose flag through to the plugin as a reserved option.
+    options["verbose"] = args.verbose
+    run_extraction(args.source_type, options, config)
 
 
 def main(argv: list[str] | None = None) -> int:

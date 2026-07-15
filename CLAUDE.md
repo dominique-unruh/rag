@@ -14,7 +14,7 @@ Pipeline stages: **extract → translate → embed → chat**. **Only extraction
 ## Architecture (implemented parts)
 
 - `rag/config.py` — central YAML config; each plugin gets its own subtree.
-- `rag/secrets.py` — secret resolution: env → keyring → file → prompt. Never in YAML.
+- `rag/secrets.py` — secret resolution: keyring → file → prompt. Never in YAML.
 - `rag/timestamps.py` — shared timestamp parsing (`1d ago`, ISO 8601, `today`, …).
 - `rag/blobs.py` — content-addressed blob store on the filesystem (SHA-256, sharded, immutable).
 - `rag/db.py` — SQLite (WAL) connection + schema + forward-only migrations (via `PRAGMA user_version`).

@@ -1,15 +1,13 @@
 """Secret resolution (PLAN §10).
 
 Secrets never live in the YAML config or the repo. They are resolved, in order,
-from an environment variable, then the desktop keyring, then an optional file,
-and finally — only when running interactively — an input prompt whose answer is
-cached back into the keyring. Both the core and extraction plugins use this same
-mechanism.
+from the desktop keyring, then an optional file, and finally — only when running
+interactively — an input prompt whose answer is cached back into the keyring.
+Both the core and extraction plugins use this same mechanism.
 """
 
 from __future__ import annotations
 
-import os
 import sys
 from getpass import getpass
 from pathlib import Path
@@ -44,40 +42,32 @@ class Secrets:
         self,
         key: str,
         *,
-        env: str | None = None,
         file: Path | None = None,
         prompt_text: str | None = None,
     ) -> str:
         """Resolve the secret named ``key``.
 
         Resolution order:
-        1. environment variable ``env`` (if given and set);
-        2. the keyring entry ``(service, key)``;
-        3. the first line of ``file`` (if given and present);
-        4. an interactive prompt (only when prompting is allowed), whose value is
+        1. the keyring entry ``(service, key)``;
+        2. the first line of ``file`` (if given and present);
+        3. an interactive prompt (only when prompting is allowed), whose value is
            written back to the keyring for next time.
 
         Raises :class:`SecretNotFoundError` when every source is exhausted.
         """
-        # 1. Environment variable — highest precedence, convenient for CI/headless.
-        if env is not None:
-            from_env = os.environ.get(env)
-            if from_env:
-                return from_env
-
-        # 2. Desktop keyring — the normal persistent store.
+        # 1. Desktop keyring — the normal persistent store.
         from_keyring = keyring.get_password(self._service, key)
         if from_keyring:
             return from_keyring
 
-        # 3. Plain file fallback (e.g. a 0600 secrets file on a server).
+        # 2. Plain file fallback (e.g. a 0600 secrets file on a server).
         if file is not None:
             path = file.expanduser()
             if path.exists():
                 # Only the first line is the secret; trailing newlines are stripped.
                 return path.read_text().splitlines()[0]
 
-        # 4. Interactive prompt, caching the answer into the keyring.
+        # 3. Interactive prompt, caching the answer into the keyring.
         if self._allow_prompt:
             value = getpass(prompt_text or f"Enter secret for {key!r}: ")
             if value:
@@ -86,6 +76,6 @@ class Secrets:
                 return value
 
         raise SecretNotFoundError(
-            f"could not resolve secret {key!r} (tried env/keyring/file; prompting "
+            f"could not resolve secret {key!r} (tried keyring/file; prompting "
             f"{'disabled' if not self._allow_prompt else 'produced no value'})"
         )

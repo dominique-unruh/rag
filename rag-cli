@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Convenience launcher for the rag CLI without a manual install step.
+# Ensures a venv with the required dependencies exists, then runs the CLI
+# against the in-repo source.
+#
+# Usage: ./rag-cli -v extract email count=1
+set -euo pipefail
+
+# Absolute path to this script's directory (the repo root).
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV="$DIR/.venv"
+PY="$VENV/bin/python"
+
+# Create the venv on first use.
+if [ ! -x "$PY" ]; then
+    python3 -m venv "$VENV"
+fi
+
+# Dependencies installed into the venv on first use. secretstorage + jeepney give
+# the keyring the pure-python D-Bus SecretService backend (fixes the
+# "libsecret required" error); pyyaml + keyring are the core deps.
+# A sentinel marks completion so normal runs skip the check entirely. We install
+# explicitly into the venv rather than probing imports, because a venv created
+# with --system-site-packages can satisfy imports from system packages while its
+# own site remains empty.
+_SENTINEL="$VENV/.rag-deps-installed"
+_DEPS=(pyyaml keyring secretstorage jeepney)
+if [ ! -f "$_SENTINEL" ]; then
+    echo "rag-cli: installing dependencies into $VENV ..." >&2
+    if command -v uv >/dev/null 2>&1; then
+        # uv-managed venv (no pip inside): install with uv against this venv.
+        uv pip install --python "$PY" -q "${_DEPS[@]}"
+    else
+        # Standard venv: bootstrap pip if needed, then install.
+        "$PY" -m ensurepip --upgrade >/dev/null 2>&1 || true
+        "$PY" -m pip install -q --upgrade pip
+        "$PY" -m pip install -q "${_DEPS[@]}"
+    fi
+    touch "$_SENTINEL"
+fi
+
+# Force the pure-python SecretService keyring backend (provided by secretstorage,
+# installed above). This overrides any local keyring config that selects the
+# libsecret backend, which needs PyGObject/gi that we don't install. Both backends
+# talk to the same D-Bus secret service (gnome-keyring / KWallet), so stored
+# passwords are interchangeable.
+export PYTHON_KEYRING_BACKEND="keyring.backends.SecretService.Keyring"
+
+# Put the repo on sys.path so `rag` imports, and use the venv interpreter.
+exec env PYTHONPATH="$DIR" "$PY" -m rag.cli "$@"

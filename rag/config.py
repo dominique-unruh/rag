@@ -77,17 +77,17 @@ class Config:
         return self._resolve_path(str(raw))
 
     def plugin_config(self, source_type: str) -> Mapping[str, Any]:
-        """Return the config subtree for the plugin ``source_type``.
+        """Return the config subtree for the extractor ``source_type``.
 
-        Looks up ``plugins.<source_type>``; returns an empty mapping when the
-        plugin has no configured section (a plugin may need none).
+        Looks up ``extractors.<source_type>``; returns an empty mapping when the
+        extractor has no configured section (an extractor may need none).
         """
-        plugins = self._data.get("plugins", {})
-        if not isinstance(plugins, Mapping):
-            raise ConfigError("top-level 'plugins' must be a mapping")
-        section = plugins.get(source_type, {})
+        extractors = self._data.get("extractors", {})
+        if not isinstance(extractors, Mapping):
+            raise ConfigError("top-level 'extractors' must be a mapping")
+        section = extractors.get(source_type, {})
         if not isinstance(section, Mapping):
-            raise ConfigError(f"plugins.{source_type} must be a mapping")
+            raise ConfigError(f"extractors.{source_type} must be a mapping")
         return section
 
     @property
