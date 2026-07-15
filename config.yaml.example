@@ -22,6 +22,7 @@ extractors:
         # port: 993                  # optional; defaults to 993 (SSL) / 143 (plain)
         # ssl: true                  # optional; defaults to true
         # folders: [INBOX]           # optional; default: all folders on the server
+        # exclude_folders: [Spam]    # optional; folders to skip (applied after the above)
         # Password resolution order (never put it here):
         #   1. desktop keyring (service "rag", key = "imap:<host>:<username>")
         #   2. interactive prompt (cached to the keyring for next time)

@@ -87,12 +87,13 @@ def _header_date_iso(msg: Message) -> str:
         return ""
 
 
-def build_stable_metadata(msg: Message, account_id: str) -> dict[str, Any]:
+def build_stable_metadata(msg: Message) -> dict[str, Any]:
     """Build the content-defining metadata for a parsed email ``msg``.
 
-    Keys: ``date``, ``sender``, ``recipients`` (To + Cc), ``subject`` and the
-    owning ``account``. All are stable — a change means the message content
-    genuinely changed.
+    Keys: ``date``, ``sender``, ``recipients`` (To + Cc) and ``subject``. All are
+    stable — a change means the message content genuinely changed. The owning
+    account is deliberately *not* here (it is transient — a message may move
+    between accounts without its content changing).
     """
     # Combine To and Cc into one recipients list for a simple, searchable field.
     to = msg.get("To", "")
@@ -103,20 +104,21 @@ def build_stable_metadata(msg: Message, account_id: str) -> dict[str, Any]:
         "sender": _clean_address(msg.get("From", "")),
         "recipients": _clean_address_list(combined),
         "subject": _decode_mime_words(msg.get("Subject")),
-        "account": account_id,
         "mime-type": _EMAIL_MIME,
     }
 
 
-def build_transient_metadata(folder: str, *, read: bool) -> dict[str, Any]:
+def build_transient_metadata(folder: str, account_id: str, *, read: bool) -> dict[str, Any]:
     """Build the volatile IMAP state for a message.
 
-    ``folder`` is where the message currently lives; ``read`` reflects the
-    ``\\Seen`` flag. Changing either updates the row without bumping the version.
+    ``account`` is where the message currently resides, ``folder`` the mailbox
+    within it, and ``read`` reflects the ``\\Seen`` flag. All are transient:
+    moving the message between accounts/folders or reading it updates the row
+    without bumping the version.
     """
     # TODO: add IMAP UID
     # TODO: add other IMAP flags (starred? important?), not sure which ones there are.
-    return {"folder": folder, "read": read}
+    return {"account": account_id, "folder": folder, "read": read}
 
 
 def _accounts_from_config(config: Mapping[str, Any]) -> list[Mapping[str, Any]]:

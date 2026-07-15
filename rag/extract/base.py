@@ -95,11 +95,22 @@ class Store(ABC):
         """Return whether a document with this id currently exists."""
 
     @abstractmethod
-    def list_ids(self) -> Iterable[str]:
-        """Return all current ``doc_id``s for this ``source_type``.
+    def list_ids(
+        self,
+        *,
+        stable: Mapping[str, Any] | None = None,
+        transient: Mapping[str, Any] | None = None,
+    ) -> Iterable[str]:
+        """Return current ``doc_id``s for this ``source_type``, optionally filtered.
 
-        Plugins use this to detect which documents vanished at the source and
-        should be deleted.
+        ``stable`` / ``transient`` are metadata filters against the respective
+        JSONB column. Each maps a metadata key to either a scalar (equality) or a
+        list/tuple/set (membership, i.e. ``IN``); all given conditions must hold
+        (AND). With no filters, every id for this source type is returned.
+
+        Plugins use the unfiltered form to detect vanished documents, and the
+        filtered form to find documents by metadata (e.g. all mail whose transient
+        ``folder`` is now excluded).
         """
 
     @abstractmethod

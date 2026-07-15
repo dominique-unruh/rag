@@ -11,6 +11,13 @@ from rag.extract.plugins.email import (
     _clean_address_list,
     _decode_mime_words,
 )
+from rag.extract.plugins.email.imap import _list_folders, _truthy
+
+
+def test_truthy() -> None:
+    """CLI flag values parse to booleans across the usual forms."""
+    assert all(_truthy(v) for v in [True, "1", "true", "YES", "on"])
+    assert not any(_truthy(v) for v in [False, None, "0", "no", "", "off"])
 
 # A representative raw email covering display names, multiple recipients and an
 # RFC 2047 encoded subject.
@@ -50,16 +57,27 @@ def test_decode_mime_words() -> None:
 def test_build_stable_metadata() -> None:
     """Stable metadata pulls the expected fields from a parsed message."""
     msg = message_from_string(_RAW)
-    meta = build_stable_metadata(msg, "main")
+    meta = build_stable_metadata(msg)
     assert meta["sender"] == "Alice Example <alice@example.org>"
     assert meta["subject"] == "Café meeting"
-    assert meta["account"] == "main"
+    # account is transient, not stable.
+    assert "account" not in meta
     # Recipients combine To and Cc.
     assert "bob@example.com" in meta["recipients"]
     assert "dave@example.org" in meta["recipients"]
     assert meta["date"].startswith("2026-07-15T09:30:00")
 
 
+def test_list_folders_excludes() -> None:
+    """Configured folders are returned minus the exclude list (client unused here)."""
+    account = {"folders": ["INBOX", "Spam", "Sent"], "exclude_folders": ["Spam"]}
+    assert _list_folders(None, account, None) == ["INBOX", "Sent"]
+
+
 def test_build_transient_metadata() -> None:
-    """Transient metadata records folder and read state."""
-    assert build_transient_metadata("INBOX", read=True) == {"folder": "INBOX", "read": True}
+    """Transient metadata records account, folder and read state."""
+    assert build_transient_metadata("INBOX", "main", read=True) == {
+        "account": "main",
+        "folder": "INBOX",
+        "read": True,
+    }

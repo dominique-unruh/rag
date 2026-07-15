@@ -13,6 +13,7 @@ import email
 import imaplib
 import json
 import re
+import sys
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -26,9 +27,12 @@ from ...base import Store
 _DEFAULT_SSL_PORT: int = 993
 _DEFAULT_PLAIN_PORT: int = 143
 
-# Regex pulling the folder name out of an IMAP LIST response line. The name is
-# the final token, optionally double-quoted.
-_LIST_NAME_RE: re.Pattern[bytes] = re.compile(rb'"?([^"]*)"?\s*$')
+# Regex parsing an IMAP LIST response line: `(flags) "delim" name`. The name is
+# the trailing field — a quoted string (may contain spaces) or a bare atom. The
+# delimiter is a quoted char or NIL.
+_LIST_NAME_RE: re.Pattern[bytes] = re.compile(
+    rb'^\([^)]*\)\s+(?:"[^"]*"|NIL)\s+(.+?)\s*$', re.IGNORECASE
+)
 
 # Abbreviated month names for building IMAP ``DD-Mon-YYYY`` search dates, which
 # must be in English regardless of locale.
@@ -102,11 +106,18 @@ def _save_state(path: Path, state: Mapping[str, Any]) -> None:
 
 
 def _parse_folder_name(line: bytes) -> str:
-    """Extract the mailbox name from a single IMAP LIST response ``line``."""
-    match = _LIST_NAME_RE.search(line.strip())
-    # Fall back to the raw decoded line if the regex somehow misses.
+    """Extract the mailbox name from a single IMAP LIST response ``line``.
+
+    The name is kept in the server's wire form (modified UTF-7, e.g.
+    ``Entw&APw-rfe``) so it can be sent back verbatim in SELECT; only surrounding
+    quotes are stripped. Falls back to the whole line if parsing fails.
+    """
+    match = _LIST_NAME_RE.match(line.strip())
     name = match.group(1) if match else line.strip()
-    return name.decode("utf-8", errors="replace")
+    # Strip a surrounding pair of double quotes, if present.
+    if len(name) >= 2 and name[:1] == b'"' and name[-1:] == b'"':
+        name = name[1:-1]
+    return name.decode("ascii", errors="replace")
 
 
 def _list_folders(
@@ -114,32 +125,56 @@ def _list_folders(
 ) -> list[str]:
     """Return the folders to process for ``account``.
 
-    Precedence: an explicit ``folder`` CLI option, else the account's configured
-    ``folders`` list, else every folder reported by the server.
+    Precedence: an explicit ``folder`` CLI option (used as-is), else the account's
+    configured ``folders`` list, else every folder reported by the server. In the
+    latter two cases the account's ``exclude_folders`` list is then removed.
     """
     if folder_option:
-        # Caller pinned a single folder for this run.
+        # Caller pinned a single folder for this run — honoured verbatim.
         return [folder_option]
     configured = account.get("folders")
     if configured:
         # Account restricts itself to a fixed set of folders.
-        return [str(f) for f in configured]
-    # Otherwise enumerate all folders on the server.
-    typ, data = client.list()
-    if typ != "OK" or data is None:
-        return []
-    return [_parse_folder_name(line) for line in data if line]
+        base = [str(f) for f in configured]
+    else:
+        # Otherwise enumerate all folders on the server.
+        typ, data = client.list()
+        if typ != "OK" or data is None:
+            return []
+        base = [_parse_folder_name(line) for line in data if line]
+    # Drop any explicitly excluded folders (e.g. Spam, Trash).
+    excluded = {str(f) for f in (account.get("exclude_folders") or [])}
+    return [f for f in base if f not in excluded]
 
 
-def _uidvalidity(client: imaplib.IMAP4, folder: str) -> int:
-    """Return the ``UIDVALIDITY`` of ``folder`` (identifies UID-space epochs)."""
-    typ, data = client.status(_quote(folder), "(UIDVALIDITY)")
-    if typ != "OK" or not data:
-        # Unknown validity: use 0 so any stored non-zero value forces a resync.
+def _uidvalidity(client: imaplib.IMAP4) -> int:
+    """Return the ``UIDVALIDITY`` of the currently-selected folder.
+
+    Read from the untagged response left by the preceding SELECT/EXAMINE. We must
+    NOT issue ``STATUS`` on the selected mailbox — RFC 3501 forbids it and some
+    servers (e.g. Dovecot) desync the connection, which then breaks the following
+    ``UID SEARCH``. Returns 0 when the server did not report it (forces resync).
+    """
+    # imaplib stashes untagged UIDVALIDITY from the last SELECT/EXAMINE here.
+    data = client.untagged_responses.get("UIDVALIDITY")
+    if not data:
         return 0
-    # Response looks like: b'"INBOX" (UIDVALIDITY 12345)'.
-    match = re.search(rb"UIDVALIDITY\s+(\d+)", data[0])
-    return int(match.group(1)) if match else 0
+    match = re.search(rb"\d+", data[0] if isinstance(data[0], bytes) else str(data[0]).encode())
+    return int(match.group(0)) if match else 0
+
+
+def _exists_count(client: imaplib.IMAP4) -> int:
+    """Return the message count (EXISTS) of the currently-selected folder.
+
+    Read from the SELECT/EXAMINE untagged response. Used as a safety check: if the
+    server says the folder has messages but a SEARCH returns none, we treat that
+    as a glitch and skip deletion detection rather than wrongly purging documents.
+    """
+    data = client.untagged_responses.get("EXISTS")
+    if not data:
+        return 0
+    match = re.search(rb"\d+", data[0] if isinstance(data[0], bytes) else str(data[0]).encode())
+    return int(match.group(0)) if match else 0
 
 
 def _quote(folder: str) -> str:
@@ -200,11 +235,12 @@ def _fetch_message(client: imaplib.IMAP4, uid: int) -> tuple[bytes, bool] | None
     return bytes(raw), is_read
 
 
-def _message_id(raw: bytes, account_id: str, uidvalidity: int, uid: int) -> tuple[str, Any]:
+def _message_id(raw: bytes, uidvalidity: int, uid: int) -> tuple[str, Any]:
     """Parse ``raw`` and return ``(doc_id, parsed_message)``.
 
-    ``doc_id`` is ``"<account-id>:<message-id>"``; if the message lacks a
-    Message-ID header we synthesise a stable id from the UIDVALIDITY and UID.
+    ``doc_id`` is the bare ``<message-id>`` — deliberately account-independent, so
+    the same message moved between accounts keeps one identity. If the message
+    lacks a Message-ID header we synthesise an id from the UIDVALIDITY and UID.
     """
     # Parse the full message once; the caller reuses it for metadata.
     parsed = email.message_from_bytes(raw)
@@ -215,7 +251,20 @@ def _message_id(raw: bytes, account_id: str, uidvalidity: int, uid: int) -> tupl
     else:
         # No Message-ID: fall back to a UID-based identifier (stable per epoch).
         msgid = f"uidvalidity{uidvalidity}-uid{uid}"
-    return f"{account_id}:{msgid}", parsed
+    return msgid, parsed
+
+
+def _truthy(value: Any) -> bool:
+    """Interpret a CLI option value as a boolean.
+
+    Accepts actual booleans and the usual string forms (``1/true/yes/on``); any
+    other/absent value is False. Used for flag-like ``key=value`` options.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _parse_options(options: Mapping[str, Any]) -> tuple[datetime | None, datetime | None, int | None]:
@@ -228,6 +277,34 @@ def _parse_options(options: Mapping[str, Any]) -> tuple[datetime | None, datetim
     return since, until, count
 
 
+def _purge_excluded(
+    store: Store, account: Mapping[str, Any], folder_option: str | None, verbose: bool
+) -> bool:
+    """Delete docs stranded in now-excluded folders; return whether any were purged.
+
+    Finds documents whose transient (account, folder) still points at a folder in
+    the account's ``exclude_folders`` list and deletes them. Skipped when a single
+    ``folder`` is pinned on the CLI (that is not a full-account reconciliation).
+    Returns True if anything was deleted, signalling the caller to run a full pass.
+    """
+    # A pinned single-folder run is not the place to reconcile the whole account.
+    if folder_option:
+        return False
+    excluded = sorted({str(f) for f in (account.get("exclude_folders") or [])})
+    if not excluded:
+        return False
+    account_id = str(account["account-id"])
+    # Metadata query: docs of this account currently marked as in an excluded folder.
+    stranded = list(
+        store.list_ids(transient={"account": account_id, "folder": excluded})
+    )
+    for doc_id in stranded:
+        store.delete(doc_id)
+        if verbose:
+            print(f"deleted   {'':>11} [excluded] {doc_id}", file=sys.stderr)
+    return bool(stranded)
+
+
 def extract_account(
     *,
     account: Mapping[str, Any],
@@ -238,10 +315,16 @@ def extract_account(
 ) -> None:
     """Connect to one IMAP account and reconcile its folders into ``store``.
 
-    For each folder: detects deletions (known UIDs no longer on the server),
-    then fetches messages (new ones first, then already-known ones so their
-    transient flags stay current), bounded by the ``count`` option. Sync state is
-    persisted so subsequent runs stay incremental.
+    For each folder: detects deletions (known UIDs no longer on the server), then
+    fetches only new (previously-unseen) messages, bounded by the ``count``
+    option. Sync state is persisted so subsequent runs stay incremental and never
+    re-process an unchanged message.
+
+    Before syncing, documents that still carry a now-excluded folder in their
+    transient metadata are purged (via a metadata query, not IMAP); if any were
+    found, a **full pass** is run — every folder resynced from scratch, ignoring
+    the stored UID memory — so messages that also live in an included folder are
+    re-added.
     """
     account_id = str(account["account-id"])
     since, until, count = _parse_options(options)
@@ -255,23 +338,39 @@ def extract_account(
     try:
         state_path = _state_path(state_dir, account_id)
         state = _load_state(state_path)
-        # Remaining fetch budget for this run (None = unlimited).
+        # Purge docs stranded in now-excluded folders. If any were purged, force a
+        # full resync so any that also live in an included folder come back. The
+        # `full` run option forces a full resync unconditionally.
+        full_pass = _purge_excluded(store, account, folder_option, verbose)
+        if _truthy(options.get("full")):
+            full_pass = True
+        # A full pass invalidates the UID memory (re-fetch from scratch) but still
+        # honours the count budget — a large mailbox is resynced over several runs.
         remaining = count
         for folder in _list_folders(client, account, folder_option):
             # Read-only select: we never modify the mailbox.
-            typ, _ = client.select(_quote(folder), readonly=True)
+            typ, dat = client.select(_quote(folder), readonly=True)
             if typ != "OK":
-                # Folder vanished or is inaccessible; skip it this run.
+                # A folder we listed but cannot select is a real error — always
+                # surface it (not just in verbose mode), then skip it this run.
+                detail = dat[0].decode(errors="replace") if dat and dat[0] else typ
+                print(f"warning: cannot select folder {folder!r}: {detail}", file=sys.stderr)
                 continue
+            # Read UIDVALIDITY + message count from the SELECT response (never STATUS).
+            validity = _uidvalidity(client)
+            exists = _exists_count(client)
             remaining = _sync_folder(
                 client=client,
                 store=store,
                 state=state,
                 account_id=account_id,
                 folder=folder,
+                validity=validity,
+                exists=exists,
                 since=since,
                 until=until,
                 remaining=remaining,
+                full_pass=full_pass,
                 verbose=verbose,
             )
             # Persist after each folder so partial progress survives a crash.
@@ -295,51 +394,72 @@ def _sync_folder(
     state: dict[str, Any],
     account_id: str,
     folder: str,
+    validity: int,
+    exists: int,
     since: datetime | None,
     until: datetime | None,
     remaining: int | None,
+    full_pass: bool = False,
     verbose: bool = False,
 ) -> int | None:
     """Reconcile a single ``folder``; return the updated fetch ``remaining`` budget.
 
     Handles UIDVALIDITY changes (resync), deletion detection and bounded fetching
-    of new-then-known messages, updating ``state`` in place. When ``verbose``,
-    prints a one-liner per deleted and per extracted message.
+    of new (previously-unseen) messages only, updating ``state`` in place. When
+    ``full_pass``, the stored UID memory is ignored and every message is
+    re-fetched (used after an excluded-folder purge). When ``verbose``, prints a
+    one-liner per deleted and per extracted message.
     """
     from . import build_stable_metadata, build_transient_metadata  # avoid import cycle
 
-    validity = _uidvalidity(client, folder)
     folders_state: dict[str, Any] = state.setdefault("folders", {})
     prior = folders_state.get(folder)
     # known maps str(uid) -> doc_id for messages we have already extracted.
-    if prior is not None and int(prior.get("uidvalidity", 0)) == validity:
+    # A full pass deliberately ignores the stored UID memory and re-fetches all.
+    if not full_pass and prior is not None and int(prior.get("uidvalidity", 0)) == validity:
         known: dict[str, str] = dict(prior.get("uids", {}))
         validity_matched = True
     else:
-        # New folder or the UID space was reset: discard the stale UID map and
+        # Full pass, new folder, or reset UID space: discard the stale UID map and
         # re-fetch. Do not delete docs — the message-id-based doc_ids stay valid.
         known = {}
         validity_matched = False
 
     # All current UIDs, used for deletion detection.
     all_uids = set(_search_uids(client))
-    if validity_matched:
+    # Safety: if the folder is non-empty but the search returned nothing, treat it
+    # as a glitch and skip deletion (deletions cascade — never purge on a bad read).
+    search_trustworthy = bool(all_uids) or exists == 0
+    if validity_matched and search_trustworthy:
         # Any previously-known UID missing from the server was deleted upstream.
+        # Each deletion consumes one unit of the shared budget, like an upsert.
         for uid_str, doc_id in list(known.items()):
+            if remaining is not None and remaining <= 0:
+                # Budget exhausted; remaining deletions handled on the next run.
+                break
             if int(uid_str) not in all_uids:
                 store.delete(doc_id)
                 del known[uid_str]
                 if verbose:
                     # Say what we just did — deleted a vanished message.
-                    print(f"deleted   {doc_id}")
+                    print(f"deleted   {'':>11} [{folder}] {doc_id}")
+                if remaining is not None:
+                    remaining -= 1
 
-    # Candidate UIDs to (re)fetch, filtered by the date window.
+    # Candidate UIDs, filtered by the date window. Only fetch UIDs we have not
+    # seen before: an already-known message is not re-processed when nothing
+    # changed IMAP-side. (New mail = new UID; a move/delete is handled via the
+    # deletion pass + a new UID in the destination folder.)
     candidates = _search_uids(client, since=since, until=until)
-    # Process unknown UIDs first (real new mail), then known ones to refresh their
-    # transient flags — all subject to the shared budget.
     unknown = [u for u in candidates if str(u) not in known]
-    already = [u for u in candidates if str(u) in known]
-    for uid in unknown + already:
+    if verbose:
+        # Per-folder summary so an empty run is explainable.
+        print(
+            f"[{folder}] {len(all_uids)} on server, {len(known)} known, "
+            f"{len(unknown)} new",
+            file=sys.stderr,
+        )
+    for uid in unknown:
         if remaining is not None and remaining <= 0:
             # Budget exhausted; stop fetching but keep the state gathered so far.
             break
@@ -348,11 +468,11 @@ def _sync_folder(
             # Message disappeared between search and fetch; ignore it.
             continue
         raw, is_read = fetched
-        doc_id, parsed = _message_id(raw, account_id, validity, uid)
+        doc_id, parsed = _message_id(raw, validity, uid)
         # Build both metadata sets and upsert. Duplicate message-ids are fine
         # (exist_ok default True); an unchanged body just refreshes transient.
-        stable = build_stable_metadata(parsed, account_id)
-        transient = build_transient_metadata(folder, read=is_read)
+        stable = build_stable_metadata(parsed)
+        transient = build_transient_metadata(folder, account_id, read=is_read)
         result = store.upsert(doc_id, raw, stable, transient=transient)
         known[str(uid)] = doc_id
         if verbose:
@@ -362,8 +482,8 @@ def _sync_folder(
                 date_str = _imap_date(datetime.fromisoformat(date_iso)) if date_iso else "?"
             except ValueError:
                 date_str = "?"
-            # One line per item: what happened + date + id + subject.
-            print(f"{result.status.value:9} {date_str:>11} {doc_id}  {stable['subject']}")
+            # One line per item: what happened + date + folder + id + subject.
+            print(f"{result.status.value:9} {date_str:>11} [{folder}] {doc_id}  {stable['subject']}")
         if remaining is not None:
             remaining -= 1
 

@@ -291,9 +291,14 @@ class Store(Protocol):
     def exists(self, doc_id: str) -> bool:
         """Whether a document with this id currently exists."""
 
-    def list_ids(self) -> "Iterable[str]":
-        """All current doc_ids for this source_type — used by the plugin to
-        detect which documents vanished and should be deleted."""
+    def list_ids(self, *, stable: dict[str, object] | None = None,
+                 transient: dict[str, object] | None = None) -> "Iterable[str]":
+        """Current doc_ids for this source_type, optionally filtered by metadata.
+
+        `stable` / `transient` map a metadata key to a scalar (equality) or a
+        list (membership); all conditions AND together. Unfiltered, returns every
+        id (used to detect vanished documents); filtered, finds documents by
+        metadata (e.g. all mail whose transient `folder` is now excluded)."""
 
     def get_metadata(self, doc_id: str) -> "dict[str, object] | None":
         """Stored **stable** metadata for a document, or None if absent."""
@@ -351,32 +356,43 @@ Extracts email from one or more IMAP accounts.
 **Configuration** (its YAML subtree): a list of IMAP **accounts**. Each account:
 - `account-id` — short, stable string; used in doc-ids.
 - `description` — human-readable, for human consumption only.
-- connection settings — host, username, folder(s), etc. The **password comes
-  from the shared secrets mechanism** (§10), never from the YAML.
+- connection settings — host, username, optional `folders` (default: all) and
+  `exclude_folders` (skip-list, e.g. Spam/Trash), etc. The **password comes from
+  the shared secrets mechanism** (§10), never from the YAML.
 
 **Documents**:
-- `doc_id = "<account-id>:<message-id>"`.
-- Duplicate message-ids (within an account) do **not** raise — it doesn't matter
-  which copy is kept (they are the same message). Implemented via `upsert` with
-  the default `exist_ok=True`.
+- `doc_id = "<message-id>"` — the bare Message-ID, **not** scoped by account.
+  Rationale: the same message moved between accounts is still the same message,
+  so it keeps one identity. (If a message lacks a Message-ID, a UID-based id is
+  synthesised.)
+- Duplicate message-ids do **not** raise — it doesn't matter which copy is kept
+  (they are the same message). Implemented via `upsert` with the default
+  `exist_ok=True`.
 - **Blob** = the full raw email in RFC 5322 format, headers included.
 - **Stable metadata** (content-defining; changes bump the version):
   - `date`
   - `sender` — cleaned `NAME <EMAIL>` form (NAME optional).
   - `recipients` — cleaned, comma-separated list of `NAME <EMAIL>` entries.
   - `subject`
-  - `account` — the `account-id`.
 - **Transient metadata** (informational; never bumps the version):
+  - `account` — the `account-id` the message currently resides in.
   - `folder` — the IMAP folder the message currently resides in.
   - `read` — whether the message is currently marked read/seen.
   - (other volatile IMAP flags as useful.)
-  Moving a message between folders or reading it thus updates the row without
-  retriggering translation/embedding.
+  Moving a message between accounts/folders or reading it thus updates the row
+  without retriggering translation/embedding.
 
 **State dir**: stores per-folder IMAP sync state (e.g. `UIDVALIDITY` + the set /
 high-water-mark of seen UIDs) so each run cheaply detects **new** messages
 (UIDs above the mark) and **deleted** ones (known UIDs no longer present →
 `store.delete`). On a `UIDVALIDITY` change the folder is resynced from scratch.
+
+**Excluded-folder purge**: at the start of an account run, documents still marked
+(in transient metadata) as living in a now-`exclude_folders` folder are found via
+`store.list_ids(transient=…)` and deleted — no IMAP needed. If any were purged, a
+**full pass** follows: every included folder is resynced from scratch (ignoring
+the stored UID memory), so a message that also lives in an included folder is
+re-added. This keeps the logic inside the plugin (no separate maintenance step).
 
 **`run` options**:
 - `since=<timestamp>` — only messages at/after this time.
@@ -384,6 +400,9 @@ high-water-mark of seen UIDs) so each run cheaply detects **new** messages
 - `count=<N>` — max number of messages to extract in this run (bounds cost).
 - `folder=<name>` — restrict to one IMAP folder (default: all folders).
 - `account=<account-id>` — restrict to one configured account (default: all).
+- `full=1` — force a full resync: invalidate the stored UID memory so every
+  message is re-considered (also triggered automatically by an excluded-folder
+  purge). Still bounded by `count`, so a large mailbox resyncs over several runs.
 
 Timestamps are parsed by the shared timestamp utility (§10.1).
 

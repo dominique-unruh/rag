@@ -175,12 +175,46 @@ class SqliteStore(Store):
         )
         return cursor.fetchone() is not None
 
-    def list_ids(self) -> Iterable[str]:
-        """Return all current ``doc_id``s for this source_type as a list."""
-        cursor = self._conn.execute(
-            "SELECT doc_id FROM documents WHERE source_type = ? ORDER BY doc_id",
-            (self._source_type,),
+    def list_ids(
+        self,
+        *,
+        stable: Mapping[str, Any] | None = None,
+        transient: Mapping[str, Any] | None = None,
+    ) -> Iterable[str]:
+        """Return doc_ids for this source_type, optionally filtered by metadata.
+
+        See :meth:`Store.list_ids`. Filters are translated to ``json_extract``
+        conditions on the respective JSONB column (unindexed scan — fine at this
+        scale).
+        """
+        # Always scope to this plugin's source_type.
+        clauses: list[str] = ["source_type = ?"]
+        params: list[Any] = [self._source_type]
+        # Build one condition per (column, key, value) filter entry.
+        for column, filt in (("stable_metadata", stable), ("transient_metadata", transient)):
+            if not filt:
+                continue
+            for key, value in filt.items():
+                path = f"$.{key}"
+                if isinstance(value, (list, tuple, set)):
+                    # Membership test: json_extract(col, path) IN (?, ?, ...).
+                    values = list(value)
+                    if not values:
+                        # An empty membership set matches nothing; short-circuit.
+                        return []
+                    placeholders = ",".join("?" * len(values))
+                    clauses.append(f"json_extract({column}, ?) IN ({placeholders})")
+                    params.append(path)
+                    params.extend(values)
+                else:
+                    # Scalar equality test.
+                    clauses.append(f"json_extract({column}, ?) = ?")
+                    params.append(path)
+                    params.append(value)
+        query = (
+            f"SELECT doc_id FROM documents WHERE {' AND '.join(clauses)} ORDER BY doc_id"
         )
+        cursor = self._conn.execute(query, params)
         # Materialise to a list so callers can iterate repeatedly / take len().
         return [row["doc_id"] for row in cursor.fetchall()]
 

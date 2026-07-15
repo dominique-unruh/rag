@@ -72,6 +72,23 @@ def test_get_metadata_and_list_ids(store: SqliteStore) -> None:
     assert store.get_metadata("missing") is None
 
 
+def test_list_ids_metadata_filters(store: SqliteStore) -> None:
+    """list_ids filters by stable/transient metadata (equality and membership)."""
+    store.upsert("a", b"x", {"subject": "A"}, transient={"account": "main", "folder": "Spam"})
+    store.upsert("b", b"y", {"subject": "B"}, transient={"account": "main", "folder": "INBOX"})
+    store.upsert("c", b"z", {"subject": "C"}, transient={"account": "work", "folder": "INBOX"})
+    # Scalar equality on transient.
+    assert list(store.list_ids(transient={"folder": "Spam"})) == ["a"]
+    # Membership (IN) + AND across keys.
+    assert set(store.list_ids(transient={"account": "main", "folder": ["Spam", "INBOX"]})) == {"a", "b"}
+    # Stable-metadata filter.
+    assert list(store.list_ids(stable={"subject": "C"})) == ["c"]
+    # No filter -> all.
+    assert set(store.list_ids()) == {"a", "b", "c"}
+    # Empty membership set matches nothing.
+    assert list(store.list_ids(transient={"folder": []})) == []
+
+
 def test_delete(store: SqliteStore) -> None:
     """Delete removes the document and reports existence."""
     store.upsert("a", b"body", {"title": "A"})
