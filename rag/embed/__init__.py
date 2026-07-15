@@ -39,6 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
 def run_embed(cfg, verbose: bool = False, delay: float = 0.0,
               max_items: int | None = None, docs_pattern: str | None = None) -> None:
     store = stores.open_document_store(cfg)
+    store.check_locked("embed", {
+        "embed_model": cfg.models.embed_model,
+        "embed_dim": cfg.models.embed_dim,
+        "chunk_size": cfg.chunking.chunk_size,
+        "chunk_overlap": cfg.chunking.chunk_overlap,
+    })
     client = stores.open_qdrant_client(cfg)
     log = HtmlLog(stores.logs_dir(cfg) / "embed.html", "rag embed log")
     try:

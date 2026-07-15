@@ -4,12 +4,27 @@ from __future__ import annotations
 
 from rag.documents import (
     AUTO_KEYS,
+    EMPTY_PLACEHOLDER,
     DocumentStore,
     compute_hash,
+    content_or_placeholder,
     filter_changes,
     plan_changes,
     to_document,
 )
+
+
+def test_content_or_placeholder():
+    assert content_or_placeholder("hi") == "hi"
+    assert content_or_placeholder("") == EMPTY_PLACEHOLDER
+    assert content_or_placeholder("  \n\t ") == EMPTY_PLACEHOLDER
+    assert content_or_placeholder(None) == EMPTY_PLACEHOLDER
+
+
+def test_to_document_blank_text_placeholder(tmp_path):
+    s = DocumentStore(tmp_path / "d.db")
+    s.upsert("notes", "/blank.md", "   \n", {})
+    assert to_document(s.get("notes:/blank.md")).text == EMPTY_PLACEHOLDER
 
 
 def _store(tmp_path):
@@ -79,6 +94,26 @@ def test_compute_hash_ignores_bookkeeping_keys():
     b = compute_hash("t", {"subject": "s", **{k: "x" for k in AUTO_KEYS}})
     assert a == b  # AUTO_KEYS excluded from the hash
     assert compute_hash("t", {"subject": "s"}) != compute_hash("t", {"subject": "z"})
+
+
+def test_check_locked(tmp_path):
+    import pytest
+    from rag.errors import UserError
+
+    s = _store(tmp_path)
+    # first call records the values
+    s.check_locked("embed", {"embed_model": "e1", "embed_dim": 768})
+    # same values -> ok
+    s.check_locked("embed", {"embed_model": "e1", "embed_dim": 768})
+    # changed locked value -> error
+    with pytest.raises(UserError, match="locked config changed"):
+        s.check_locked("embed", {"embed_model": "e2", "embed_dim": 768})
+    # a different component is independent
+    s.check_locked("graphrag", {"embed_model": "e9"})
+    # a newly added key is recorded, then enforced
+    s.check_locked("embed", {"embed_model": "e1", "chunk_size": 512})
+    with pytest.raises(UserError):
+        s.check_locked("embed", {"chunk_size": 1024})
 
 
 def test_plan_changes():

@@ -217,6 +217,60 @@ def test_idle_release_closes_when_idle():
     assert viewer._GRAPH is None and viewer._DOCS is None and docs.closed
 
 
+class _FakeGR:
+    def exists(self):
+        return True
+
+    def entities(self):
+        return [{"name": "Dominique", "type": "PERSON",
+                 "description": "a person", "text_unit_ids": ["tu1"]}]
+
+    def entity(self, name):
+        return self.entities()[0] if name == "Dominique" else None
+
+    def relationships(self):
+        return [{"source": "Dominique", "target": "QIS",
+                 "description": "works at", "weight": 1, "text_unit_ids": ["tu1"]}]
+
+    def relationships_of(self, name):
+        return self.relationships()
+
+    def community_reports(self):
+        return [{"community": "0", "level": 0, "title": "Work",
+                 "summary": "s", "full_content": "f"}]
+
+    def community(self, cid):
+        return self.community_reports()[0] if cid == "0" else None
+
+    def provenance_docs(self, ids):
+        return ["notes:/w.md"]
+
+
+def test_home_shows_graphrag_card(seeded, monkeypatch):
+    client, _, _, _ = seeded
+    monkeypatch.setattr(viewer, "_gr", lambda: _FakeGR())
+    body = _text(client.get("/"))
+    assert "GraphRAG" in body and "community reports" in body
+    assert "/graphrag/entity" in body and "/graphrag/community" in body
+
+
+def test_graphrag_entity_page_with_provenance(seeded, monkeypatch):
+    client, _, _, _ = seeded
+    monkeypatch.setattr(viewer, "_gr", lambda: _FakeGR())
+    body = _text(client.get("/graphrag/entity", query_string={"id": "Dominique"}))
+    assert "graphrag entity" in body
+    assert "a person" in body and "QIS" in body
+    # cross-DB: provenance links to our Document Store doc
+    assert 'id=notes:/w.md' in body or "notes:/w.md" in body
+
+
+def test_graphrag_community_page(seeded, monkeypatch):
+    client, _, _, _ = seeded
+    monkeypatch.setattr(viewer, "_gr", lambda: _FakeGR())
+    body = _text(client.get("/graphrag/community", query_string={"id": "0"}))
+    assert "community report" in body and "Work" in body
+
+
 def test_parser_defaults():
     args = viewer.build_parser().parse_args([])
     assert args.host == "127.0.0.1" and args.port == 5000 and args.reload is False

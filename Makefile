@@ -46,6 +46,10 @@ graph: install ## Pipeline 3: Document Store -> Kùzu property graph
 sync: install ## Run all three pipelines: extract -> embed -> graph
 	$(PY) -m rag.sync $(PIPE_ARGS)
 
+.PHONY: graphrag
+graphrag: install ## Index the Document Store with Microsoft GraphRAG (separate DB)
+	$(PY) -m rag.graphrag $(PIPE_ARGS)
+
 .PHONY: chat
 chat: install ## Start the interactive chat REPL
 	rlwrap $(PY) -m rag.chat --trace

@@ -17,6 +17,8 @@ dependencies = [
     "keyring",
     "flask",
     "markdown",
+    "graphrag",
+    "botocore",  # litellm (via graphrag) pre-loads AWS stream shapes; avoids warnings
 ]
 
 [project.optional-dependencies]

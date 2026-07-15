@@ -25,9 +25,19 @@ from pathlib import Path
 
 from llama_index.core import Document
 
+from .errors import UserError
+
 # metadata keys that are bookkeeping, not content (kept out of embeddings/LLM).
 # local_id is not stored — it is doc_id with the "extractor:" prefix stripped.
 AUTO_KEYS = ("doc_id", "extractor", "doc_hash")
+
+# Substituted for blank document text wherever a doc is embedded/indexed, so no
+# empty text reaches the embedders (empty vectors break e.g. GraphRAG/lancedb).
+EMPTY_PLACEHOLDER = "[empty file]"
+
+
+def content_or_placeholder(text: str) -> str:
+    return text if (text or "").strip() else EMPTY_PLACEHOLDER
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents(
@@ -41,9 +51,11 @@ CREATE TABLE IF NOT EXISTS documents(
 CREATE INDEX IF NOT EXISTS idx_documents_extractor ON documents(extractor);
 CREATE TABLE IF NOT EXISTS embed_state(doc_id TEXT PRIMARY KEY, doc_hash TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS graph_state(doc_id TEXT PRIMARY KEY, doc_hash TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS graphrag_state(doc_id TEXT PRIMARY KEY, doc_hash TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS locks(component TEXT, key TEXT, value TEXT, PRIMARY KEY(component, key));
 """
 
-LEDGERS = ("embed_state", "graph_state")
+LEDGERS = ("embed_state", "graph_state", "graphrag_state")
 
 
 @dataclass
@@ -65,7 +77,8 @@ def compute_hash(text: str, metadata: dict) -> str:
 
 def to_document(doc: StoredDoc) -> Document:
     """Build a LlamaIndex Document with the global doc_id as its stable id."""
-    d = Document(text=doc.text, metadata=dict(doc.metadata), id_=doc.doc_id)
+    d = Document(text=content_or_placeholder(doc.text),
+                 metadata=dict(doc.metadata), id_=doc.doc_id)
     for key in AUTO_KEYS:
         if key in d.metadata:
             d.excluded_embed_metadata_keys.append(key)
@@ -180,6 +193,36 @@ class DocumentStore:
     def unmark(self, table: str, doc_id: str) -> None:
         self._check_ledger(table)
         self.conn.execute(f"DELETE FROM {table} WHERE doc_id=?", (doc_id,))
+        self.conn.commit()
+
+    # --- locked config ----------------------------------------------------
+
+    def check_locked(self, component: str, values: dict) -> None:
+        """Record a component's build-time config on first use; on later runs,
+        raise if any locked value changed (would corrupt the built store).
+
+        Locked = fixed once the store is built (e.g. embedding model / dim,
+        chunking). Changeable config (chat model, endpoint) is not passed here.
+        """
+        stored = {r["key"]: r["value"]
+                  for r in self.conn.execute(
+                      "SELECT key, value FROM locks WHERE component=?", (component,))}
+        mismatches = {k: (stored[k], str(v)) for k, v in values.items()
+                      if k in stored and stored[k] != str(v)}
+        if mismatches:
+            detail = "; ".join(f"{k}: '{o}' → '{n}'" for k, (o, n) in mismatches.items())
+            raise UserError(
+                f"{component}: locked config changed ({detail}). These are fixed once "
+                f"the store is built. To change them, wipe the store "
+                f"(make clean-storage) and re-index."
+            )
+        # Record first-seen values (and any newly added keys).
+        for k, v in values.items():
+            if k not in stored:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO locks(component, key, value) VALUES (?,?,?)",
+                    (component, k, str(v)),
+                )
         self.conn.commit()
 
 

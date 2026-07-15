@@ -52,6 +52,13 @@ def logs_dir(cfg: Config) -> Path:
     return d
 
 
+def graphrag_dir(cfg: Config) -> Path:
+    """Root workspace for the Microsoft GraphRAG index (separate from Kùzu)."""
+    d = _storage_dir(cfg) / "graphrag"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 # --- Document Store -------------------------------------------------------
 
 def open_document_store(cfg: Config, check_same_thread: bool = True) -> DocumentStore:

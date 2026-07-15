@@ -30,6 +30,17 @@ _CFG: config.Config | None = None
 _GRAPH = None        # KuzuPropertyGraphStore (opened once in main)
 _GRAPH_DB = None     # underlying kuzu.Database (closed at shutdown)
 _DOCS = None         # DocumentStore (canonical documents)
+_GR = None           # GraphRagStore (Microsoft GraphRAG parquet output)
+
+
+def _gr():
+    """The GraphRAG reader (separate DB). Cheap: reads parquet on demand."""
+    global _GR
+    if _GR is None:
+        from ..graphrag.workspace import output_dir
+        from ..graphrag.reader import GraphRagStore
+        _GR = GraphRagStore(output_dir(_CFG))
+    return _GR
 
 
 @app.errorhandler(Exception)
@@ -432,6 +443,7 @@ aside li{padding:3px 0;border-bottom:1px solid #f0f0f2;white-space:nowrap;overfl
   border-radius:4px;font-size:10px;font-weight:700;margin-right:6px;color:#fff;padding:0 3px}
 .hb.entity{background:#2657c7}.hb.chunk{background:#1f9d55}.hb.relation{background:#c2681f}
 .hb.document{background:#8a4fbf}.hb.search{background:#888}.hb.home{background:#aaa}
+.hb.graphrag{background:#c2681f}
 h2.title{margin:8px 0 4px;font-size:19px;word-break:break-word}
 h3{font-size:13px;text-transform:uppercase;color:#666;margin:18px 0 6px;border-bottom:1px solid #eee;padding-bottom:4px}
 table{border-collapse:collapse;width:100%;font-size:13px}
@@ -463,8 +475,9 @@ ul.plain{margin:6px 0;padding-left:18px}ul.plain li{margin:2px 0}
 _HISTORY_JS = """
 (function(){
   var KEY='rag_view_history';
-  var LETTER={relation:'R',chunk:'C',entity:'E',document:'D',search:'S',home:'H'};
+  var LETTER={relation:'R',chunk:'C',entity:'E',document:'D',search:'S',home:'H',graphrag:'G'};
   function kindOf(url){
+    if(url.indexOf('/graphrag/')===0)return 'graphrag';
     if(url.indexOf('/relation')===0)return 'relation';
     if(url.indexOf('/search')===0)return 'search';
     if(url.indexOf('/item')===0){
@@ -563,9 +576,38 @@ def index():
         f"<p>{len(entities)} entities · {n_rel} relations · {len(docs)} documents<br>"
         f"({n_embed} embedded, {n_graph} graph-extracted)</p></div>"
         f"<div class=card><h3>Documents</h3><ul class=plain>{doc_list or '<li class=empty>none</li>'}</ul></div>"
-        f"<div class=card><h3>Entities</h3><ul class=plain>{ent_list or '<li class=empty>none</li>'}</ul></div>"
+        f"<div class=card><h3>Kùzu entities</h3><ul class=plain>{ent_list or '<li class=empty>none</li>'}</ul></div>"
+        f"{_graphrag_card()}"
     )
     return _page("home", body)
+
+
+def _gr_url(kind: str, ident: str) -> str:
+    return f"/graphrag/{kind}?" + urlencode({"id": ident})
+
+
+def _graphrag_card() -> str:
+    gr = _gr()
+    if not gr.exists():
+        return ""
+    ents = gr.entities()
+    reports = gr.community_reports()
+    ent_list = "".join(
+        f'<li><a href="{html.escape(_gr_url("entity", e["name"]))}">{html.escape(e["name"])}</a></li>'
+        for e in ents[:500]
+    ) or "<li class=empty>none</li>"
+    rep_list = "".join(
+        f'<li><a href="{html.escape(_gr_url("community", c["community"]))}">'
+        f'{html.escape(c["title"] or ("community " + c["community"]))}</a></li>'
+        for c in reports[:200]
+    ) or "<li class=empty>none</li>"
+    return (
+        f"<div class=card><h2 class=title>GraphRAG</h2>"
+        f"<p>{len(ents)} entities · {len(gr.relationships())} relationships · "
+        f"{len(reports)} community reports</p>"
+        f"<h3>GraphRAG entities</h3><ul class=plain>{ent_list}</ul>"
+        f"<h3>Community reports</h3><ul class=plain>{rep_list}</ul></div>"
+    )
 
 
 def _item_response(graph, item_id: str, kind: str | None = None):
@@ -833,6 +875,61 @@ def _relation_response(graph, rid: str):
         f"<h3>Properties</h3>{_prop_table(graph, props, kind='relation')}</div>"
     )
     return _page(f"{label}", body)
+
+
+def _gr_entity_link(name: str) -> str:
+    return f'<a href="{html.escape(_gr_url("entity", name))}">{html.escape(name)}</a>'
+
+
+def _gr_provenance(text_unit_ids) -> str:
+    """GraphRAG provenance -> links to our Document Store docs (cross-DB)."""
+    docs = _gr().provenance_docs(text_unit_ids)
+    if not docs:
+        return "<span class=empty>none</span>"
+    return " ".join(
+        f'<a href="{html.escape(_url("document", d))}">{html.escape(d)}</a>' for d in docs
+    )
+
+
+@app.route("/graphrag/entity")
+def gr_entity():
+    gr = _gr()
+    name = request.args.get("id", "")
+    e = gr.entity(name)
+    if e is None:
+        return _page("not found", "<div class=card><p class=empty>No GraphRAG entity.</p></div>"), 404
+    rels = gr.relationships_of(name)
+    rel_rows = "".join(
+        f"<tr><td>{_gr_entity_link(r['source'])}</td>"
+        f"<td class=rel>-[{html.escape(str(r['description']))[:80]}]-&gt;</td>"
+        f"<td>{_gr_entity_link(r['target'])}</td></tr>"
+        for r in rels
+    ) or "<tr><td colspan=3 class=empty>no relationships</td></tr>"
+    body = (
+        f"<div class=card><span class=\"kind entity\">graphrag entity</span>"
+        f"<h2 class=title>{html.escape(name)}</h2>"
+        f"<h3>Type</h3><p>{html.escape(str(e['type']) or '—')}</p>"
+        f"<h3>Description</h3><div class=md>{_render_md(str(e['description']))}</div>"
+        f"<h3>Provenance (documents)</h3><p>{_gr_provenance(e['text_unit_ids'])}</p>"
+        f"<h3>Relationships ({len(rels)})</h3><table class=rels>{rel_rows}</table></div>"
+    )
+    return _page(f"gr:{name}", body)
+
+
+@app.route("/graphrag/community")
+def gr_community():
+    gr = _gr()
+    cid = request.args.get("id", "")
+    c = gr.community(cid)
+    if c is None:
+        return _page("not found", "<div class=card><p class=empty>No community report.</p></div>"), 404
+    body = (
+        f"<div class=card><span class=\"kind document\">community report</span>"
+        f"<h2 class=title>{html.escape(c['title'] or ('community ' + cid))}</h2>"
+        f"<h3>Summary</h3><div class=md>{_render_md(str(c['summary']))}</div>"
+        f"<h3>Full report</h3><div class=md>{_render_md(str(c['full_content']))}</div></div>"
+    )
+    return _page(f"community {cid}", body)
 
 
 def build_parser() -> argparse.ArgumentParser:
