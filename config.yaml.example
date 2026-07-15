@@ -1,0 +1,28 @@
+# rag configuration. Copy to config.yaml and edit.
+# Everything except secrets lives here; secrets come from the OS keyring / env /
+# a file (see the notes on each password below).
+
+storage:
+  # Directory holding the metadata DB, blobs and per-plugin state. Relative paths
+  # are resolved against this config file's location.
+  dir: ./storage
+
+# One subtree per extraction plugin, keyed by the plugin's source_type (== its
+# subdirectory name under rag/extract/plugins/). A plugin only sees its own subtree.
+plugins:
+
+  email:
+    # A list of IMAP accounts. Each message becomes a document with
+    # doc_id = "<account-id>:<message-id>".
+    accounts:
+      - account-id: main            # short, stable; used in doc-ids
+        description: Personal inbox  # human-readable only
+        host: imap.example.org
+        username: me@example.org
+        # port: 993                  # optional; defaults to 993 (SSL) / 143 (plain)
+        # ssl: true                  # optional; defaults to true
+        # folders: [INBOX]           # optional; default: all folders on the server
+        # Password resolution order (never put it here):
+        #   1. env var RAG_IMAP_PASSWORD_MAIN
+        #   2. desktop keyring (service "rag", key = the username)
+        #   3. interactive prompt (cached to the keyring for next time)

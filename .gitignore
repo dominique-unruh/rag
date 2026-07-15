@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+
+# Project runtime data
+/storage/
+config.yaml
+
+# Editor / OS
+.DS_Store
