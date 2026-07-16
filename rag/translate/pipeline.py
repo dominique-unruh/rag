@@ -7,6 +7,7 @@ or, in inspection/dry-run modes, reports without touching the DB.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 
 from ..blobs import BlobStore
@@ -52,6 +53,9 @@ class TranslateOptions:
 
     inspect: bool = False
     """Print translations for review instead of storing them (dirty repo OK)."""
+
+    verbose: bool = False
+    """Print one progress line per translated document."""
 
 
 def _validate(document: SourceDocument, translations: list[Translation]) -> None:
@@ -138,6 +142,16 @@ def run_translation(
             )
             translations = translator.translate(document)
             _validate(source, translations)
+
+            if options.verbose and not options.inspect:
+                # One progress line per document (inspect mode already dumps them).
+                sub_ids = ", ".join("/".join(t.sub_doc_id) or "(root)" for t in translations)
+                prefix = "would translate" if options.dry_run else "translated"
+                print(
+                    f"{prefix} {source.source_type}:{source.doc_id} (v{source.version}) "
+                    f"-> {len(translations)} part(s) [{sub_ids}] via {options.translator}",
+                    file=sys.stderr,
+                )
 
             if options.inspect:
                 _report(source, translations)

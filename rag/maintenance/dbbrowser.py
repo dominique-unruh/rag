@@ -49,6 +49,10 @@ _EXTRA_EXTENSIONS: dict[str, str] = {
 # blobs into the browser just to look at them).
 _PREVIEW_LIMIT: int = 200_000
 
+# The single-page app HTML, loaded from a sibling file (kept out of Python so the
+# HTML/JS is editable without string-escaping headaches).
+_INDEX_HTML: str = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
+
 
 class IdleDatabase:
     """A read-only SQLite connection that closes itself after inactivity.
@@ -279,6 +283,13 @@ def _create_app(database: IdleDatabase, blobs: BlobStore) -> Flask:
             return _not_found()
         stable = json.loads(row["stable"])
         transient = json.loads(row["transient"])
+        # Translation sets that exist for this document (for the cross-link list).
+        tsets = database.query(
+            "SELECT id, source_version, translated_at, is_active "
+            "FROM translation_sets WHERE source_type = ? AND doc_id = ? "
+            "ORDER BY translated_at DESC, id DESC",
+            (row["source_type"], row["doc_id"]),
+        )
         return jsonify(
             {
                 "source_type": row["source_type"],
@@ -290,6 +301,89 @@ def _create_app(database: IdleDatabase, blobs: BlobStore) -> Flask:
                 "transient": transient,
                 # Link to the original source, if the owning extractor provides one.
                 "source_url": _source_url(row["source_type"], row["doc_id"], stable, transient),
+                "translations": [
+                    {
+                        "id": t["id"],
+                        "source_version": t["source_version"],
+                        "translated_at": t["translated_at"],
+                        "is_active": bool(t["is_active"]),
+                    }
+                    for t in tsets
+                ],
+            }
+        )
+
+    @app.get("/api/translations")
+    def api_translations() -> Response:
+        """Return the translation-set list (summary fields) as JSON, newest first."""
+        rows = database.query(
+            "SELECT ts.id, ts.source_type, ts.doc_id, ts.source_version, "
+            "ts.translated_at, ts.git_rev, ts.is_active, json(ts.metadata) AS meta, "
+            "(SELECT COUNT(*) FROM translation_parts tp WHERE tp.set_id = ts.id) AS parts "
+            "FROM translation_sets ts ORDER BY ts.translated_at DESC, ts.id DESC"
+        )
+        return jsonify(
+            [
+                {
+                    "id": r["id"],
+                    "source_type": r["source_type"],
+                    "doc_id": r["doc_id"],
+                    "source_version": r["source_version"],
+                    "translated_at": r["translated_at"],
+                    "is_active": bool(r["is_active"]),
+                    "translator": json.loads(r["meta"]).get("translator", ""),
+                    "parts": r["parts"],
+                }
+                for r in rows
+            ]
+        )
+
+    @app.get("/api/translation")
+    def api_translation() -> Response:
+        """Return one translation set: its fields + parts (with bounded content)."""
+        set_id = request.args.get("set_id", "")
+        sets = database.query(
+            "SELECT id, source_type, doc_id, source_version, translated_at, git_rev, "
+            "is_active, json(metadata) AS meta FROM translation_sets WHERE id = ?",
+            (set_id,),
+        )
+        if not sets:
+            return _not_found("translation set not found")
+        srow = sets[0]
+        part_rows = database.query(
+            "SELECT part_key, json(sub_doc_id) AS sub, json(metadata) AS meta, blob_hash "
+            "FROM translation_parts WHERE set_id = ? ORDER BY part_key",
+            (set_id,),
+        )
+        parts = []
+        for p in part_rows:
+            # Bounded text preview of the translated Markdown blob.
+            try:
+                data = blobs.get(p["blob_hash"])
+                text = data[:_PREVIEW_LIMIT].decode("utf-8", errors="replace")
+                if len(data) > _PREVIEW_LIMIT:
+                    text += "\n\n[... truncated ...]"
+            except FileNotFoundError:
+                text = "(blob missing)"
+            parts.append(
+                {
+                    "part_key": p["part_key"],
+                    "sub_doc_id": json.loads(p["sub"]),
+                    "metadata": json.loads(p["meta"]),
+                    "text": text,
+                }
+            )
+        return jsonify(
+            {
+                "id": srow["id"],
+                "source_type": srow["source_type"],
+                "doc_id": srow["doc_id"],
+                "source_version": srow["source_version"],
+                "translated_at": srow["translated_at"],
+                "git_rev": srow["git_rev"],
+                "is_active": bool(srow["is_active"]),
+                "translator": json.loads(srow["meta"]).get("translator", ""),
+                "parts": parts,
             }
         )
 
@@ -387,306 +481,3 @@ def serve(
     finally:
         database.close()
 
-
-# The single-page app: left navbar + split (list over detail) Extraction view.
-_INDEX_HTML: str = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>rag db-browser</title>
-<style>
-  * { box-sizing: border-box; }
-  body { margin: 0; font: 13px/1.4 system-ui, sans-serif; height: 100vh; display: flex; }
-  nav { width: 160px; background: #1f2430; color: #cdd3df; flex: 0 0 160px; }
-  nav h1 { font-size: 14px; padding: 12px; margin: 0; color: #fff; border-bottom: 1px solid #333b4d; }
-  nav a { display: block; padding: 10px 12px; color: #cdd3df; text-decoration: none; cursor: pointer; }
-  nav a.active, nav a:hover { background: #2b3242; color: #fff; }
-  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  #toolbar { flex: 0 0 auto; padding: 6px 8px; background: #eef1f7; border-bottom: 1px solid #ccd; }
-  #search { width: 100%; padding: 4px 8px; font: inherit; }
-  #list { flex: 1 1 45%; overflow: auto; border-bottom: 2px solid #ccc; }
-  #detail { flex: 1 1 55%; overflow: auto; padding: 10px; }
-  table { border-collapse: collapse; width: 100%; }
-  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #eee; white-space: nowrap;
-           overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
-  th { position: sticky; top: 0; z-index: 1; background: #f5f6f8; }
-  /* Keep rows clear of the sticky header when scrolled into view. */
-  #list tr { cursor: pointer; scroll-margin-top: 34px; }
-  #list tr.sel { background: #dce7ff; }
-  #detail h2 { font-size: 14px; margin: 6px 0; }
-  .meta td:first-child { color: #555; width: 160px; font-weight: 600; }
-  pre { background: #f7f7f9; border: 1px solid #e2e2e6; padding: 8px; overflow: auto; max-height: 40vh; }
-  .bar { margin: 8px 0; }
-  a.btn { background: #2b6cff; color: #fff; padding: 5px 10px; border-radius: 4px; text-decoration: none; }
-  .muted { color: #888; }
-  #ctxmenu { position: fixed; z-index: 10; background: #fff; border: 1px solid #bbb;
-             box-shadow: 0 2px 8px rgba(0,0,0,.2); display: none; }
-  #ctxmenu div { padding: 6px 14px; cursor: pointer; white-space: nowrap; }
-  #ctxmenu div:hover { background: #2b6cff; color: #fff; }
-</style>
-</head>
-<body>
-<nav>
-  <h1>db-browser</h1>
-  <a class="active" data-tool="extraction">Extraction</a>
-</nav>
-<main>
-  <div id="toolbar">
-    <input id="search" type="search" placeholder="Search rows — Enter: next, Shift+Enter: prev">
-  </div>
-  <div id="list"><p class="muted" style="padding:10px">Loading…</p></div>
-  <div id="detail"><p class="muted">Select a row above.</p></div>
-</main>
-<div id="ctxmenu">
-  <div data-act="translate">Translate (dry-run)</div>
-  <div data-act="copysql">Copy SQL</div>
-  <div data-act="copydel">Copy delete command</div>
-</div>
-<script>
-const listEl = document.getElementById('list');
-const detailEl = document.getElementById('detail');
-const menuEl = document.getElementById('ctxmenu');
-
-// Current selectable rows and the index of the selected one (-1 = none).
-let rowEls = [];
-let selIndex = -1;
-// The row the context menu currently targets ({st, id}) or null.
-let menuTarget = null;
-
-// Quote a value as a SQLite string literal (single quotes doubled).
-function sqlLit(v) { return "'" + String(v).replace(/'/g, "''") + "'"; }
-
-// Build a `FROM ... WHERE ...` clause selecting exactly one document row, so
-// `SELECT * <clause>` returns that row.
-function rowSql(st, id) {
-  return `FROM documents WHERE source_type = ${sqlLit(st)} AND doc_id = ${sqlLit(id)}`;
-}
-
-// Quote a value as a single POSIX shell argument (single-quoted, embedded
-// quotes closed/escaped/reopened).
-function shQuote(v) { return "'" + String(v).replace(/'/g, "'\\''") + "'"; }
-
-// The rag-cli command that deletes this item via the cascading store API.
-function rowDeleteCmd(st, id) {
-  return `./rag-cli maintenance delete extract ${shQuote(st)} ${shQuote(id)}`;
-}
-
-// Hide the context menu.
-function hideMenu() { menuEl.style.display = 'none'; menuTarget = null; }
-
-// Copy text to the clipboard, with a fallback for non-secure contexts.
-async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch (_) {
-    const ta = document.createElement('textarea');
-    ta.value = text; document.body.appendChild(ta); ta.select();
-    document.execCommand('copy'); ta.remove();
-  }
-}
-
-// Dismiss the menu on any outside interaction.
-document.addEventListener('click', hideMenu);
-document.addEventListener('scroll', hideMenu, true);
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideMenu(); });
-
-// "Copy SQL" action — a self-contained SELECT for that one row.
-menuEl.querySelector('[data-act="copysql"]').onclick = (e) => {
-  e.stopPropagation();
-  if (menuTarget) copyText('SELECT * ' + rowSql(menuTarget.st, menuTarget.id));
-  hideMenu();
-};
-
-// "Copy delete command" action.
-menuEl.querySelector('[data-act="copydel"]').onclick = (e) => {
-  e.stopPropagation();
-  if (menuTarget) copyText(rowDeleteCmd(menuTarget.st, menuTarget.id));
-  hideMenu();
-};
-
-// "Translate (dry-run)" action — open the preview page in a new tab.
-menuEl.querySelector('[data-act="translate"]').onclick = (e) => {
-  e.stopPropagation();
-  if (menuTarget) {
-    const q = `source_type=${encodeURIComponent(menuTarget.st)}&doc_id=${encodeURIComponent(menuTarget.id)}`;
-    window.open('/translate?' + q, '_blank');
-  }
-  hideMenu();
-};
-
-// Escape text for safe insertion into HTML.
-function esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g, c =>
-    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-
-// Reflect the current selection in the URL hash so the page is deep-linkable.
-function updateHash(st, id) {
-  const h = '#' + new URLSearchParams({ st, id }).toString();
-  // replaceState avoids piling up history entries as the selection moves.
-  if (location.hash !== h) history.replaceState(null, '', h);
-}
-
-// Select the row at index i (clamped): highlight it, scroll it into view, load
-// its detail and update the URL. Used by clicks, arrow keys and deep links.
-function selectRow(i) {
-  if (!rowEls.length) return;
-  i = Math.max(0, Math.min(rowEls.length - 1, i));
-  if (selIndex >= 0 && rowEls[selIndex]) rowEls[selIndex].classList.remove('sel');
-  selIndex = i;
-  const tr = rowEls[i];
-  tr.classList.add('sel');
-  tr.scrollIntoView({ block: 'nearest' });
-  showDetail(tr.dataset.st, tr.dataset.id);
-  updateHash(tr.dataset.st, tr.dataset.id);
-}
-
-// Select the row named by the URL hash (#st=..&id=..), if present and found.
-function applyHash() {
-  const p = new URLSearchParams(location.hash.slice(1));
-  const st = p.get('st'), id = p.get('id');
-  if (!st || !id) return false;
-  const idx = rowEls.findIndex(tr => tr.dataset.st === st && tr.dataset.id === id);
-  if (idx >= 0) { selectRow(idx); return true; }
-  return false;
-}
-
-// Follow the hash when the user pastes/edits a deep link.
-window.addEventListener('hashchange', applyHash);
-
-// How many rows make up roughly one screenful of the list viewport.
-function pageStep() {
-  const rh = rowEls[0] ? rowEls[0].offsetHeight : 20;
-  return Math.max(1, Math.floor(listEl.clientHeight / rh) - 1);
-}
-
-// Arrow and Page keys move the selection (when the list has rows). Ignored while
-// typing in an input so the search field's caret keys still work.
-document.addEventListener('keydown', (e) => {
-  const steps = { ArrowDown: 1, ArrowUp: -1, PageDown: 0, PageUp: 0 };
-  if (!(e.key in steps)) return;
-  if (!rowEls.length || e.target.tagName === 'INPUT') return;
-  e.preventDefault();
-  // Page keys move by a screenful; arrows by one.
-  let delta = steps[e.key];
-  if (e.key === 'PageDown') delta = pageStep();
-  else if (e.key === 'PageUp') delta = -pageStep();
-  // Start from the top/bottom on first keypress if nothing is selected yet.
-  const base = selIndex < 0 ? (delta > 0 ? -1 : 0) : selIndex;
-  selectRow(base + delta);
-});
-
-// --- search: jump to rows whose text (or doc_id) contains the query ---
-const searchEl = document.getElementById('search');
-
-// Whether a row matches the (lowercased) query across its visible text + doc_id.
-function rowMatches(tr, q) {
-  return (tr.textContent + ' ' + tr.dataset.id).toLowerCase().includes(q);
-}
-
-// Select the next (dir=1) or previous (dir=-1) row matching q, wrapping around.
-function findNext(q, dir) {
-  q = q.trim().toLowerCase();
-  if (!q || !rowEls.length) return;
-  const n = rowEls.length;
-  const start = selIndex < 0 ? (dir > 0 ? -1 : 0) : selIndex;
-  for (let k = 1; k <= n; k++) {
-    const i = ((start + dir * k) % n + n) % n;
-    if (rowMatches(rowEls[i], q)) { selectRow(i); return; }
-  }
-}
-
-// Enter jumps to the next match; Shift+Enter to the previous one.
-searchEl.addEventListener('keydown', (e) => {
-  if (e.key !== 'Enter') return;
-  e.preventDefault();
-  findNext(searchEl.value, e.shiftKey ? -1 : 1);
-});
-
-// Load the document list into the top half.
-async function loadList() {
-  const rows = await (await fetch('/api/documents')).json();
-  if (!rows.length) { listEl.innerHTML = '<p class="muted" style="padding:10px">No documents.</p>'; return; }
-  let html = '<table><thead><tr><th>date</th><th>source</th><th>title</th>'
-           + '<th>sender</th><th>mime</th><th>v</th></tr></thead><tbody>';
-  for (const r of rows) {
-    html += `<tr data-st="${esc(r.source_type)}" data-id="${esc(r.doc_id)}">`
-          + `<td>${esc(r.date)}</td><td>${esc(r.source_type)}</td>`
-          + `<td>${esc(r.title)}</td><td>${esc(r.sender)}</td>`
-          + `<td>${esc(r.mime_type)}</td><td>${esc(r.version)}</td></tr>`;
-  }
-  html += '</tbody></table>';
-  listEl.innerHTML = html;
-  // Cache the rows and wire clicks through the shared selection logic.
-  rowEls = Array.from(listEl.querySelectorAll('tr[data-id]'));
-  selIndex = -1;
-  rowEls.forEach((tr, i) => {
-    tr.onclick = () => selectRow(i);
-    // (context menu wiring below)
-    // Right-click: select the row and open the context menu at the cursor.
-    tr.oncontextmenu = (e) => {
-      e.preventDefault();
-      selectRow(i);
-      menuTarget = { st: tr.dataset.st, id: tr.dataset.id };
-      menuEl.style.left = e.clientX + 'px';
-      menuEl.style.top = e.clientY + 'px';
-      menuEl.style.display = 'block';
-    };
-  });
-  // Restore any selection encoded in the URL now that rows exist.
-  applyHash();
-}
-
-// Render a key/value object as a metadata table. `links` optionally maps a key
-// to an href, rendering that key's value as a hyperlink.
-function metaTable(obj, links) {
-  const keys = Object.keys(obj);
-  if (!keys.length) return '<p class="muted">(none)</p>';
-  return '<table class="meta">' + keys.map(k => {
-    const raw = typeof obj[k] === 'object' ? JSON.stringify(obj[k]) : obj[k];
-    const href = links && links[k];
-    const cell = href ? `<a href="${esc(href)}">${esc(raw)}</a>` : esc(raw);
-    return `<tr><td>${esc(k)}</td><td>${cell}</td></tr>`;
-  }).join('') + '</table>';
-}
-
-// Load and show the detail (metadata + preview + download) for one document.
-async function showDetail(st, id) {
-  const q = `source_type=${encodeURIComponent(st)}&doc_id=${encodeURIComponent(id)}`;
-  const doc = await (await fetch('/api/document?' + q)).json();
-  const core = { source_type: doc.source_type, doc_id: doc.doc_id,
-                 version: doc.version, updated_at: doc.updated_at, blob_hash: doc.blob_hash };
-  // Link the doc_id to the source URL the extractor provided, if any.
-  const links = doc.source_url ? { doc_id: doc.source_url } : null;
-  detailEl.innerHTML =
-      '<h2>Document</h2>' + metaTable(core, links)
-    + '<h2>Stable metadata</h2>' + metaTable(doc.stable)
-    + '<h2>Transient metadata</h2>' + metaTable(doc.transient)
-    + '<h2>Content</h2>'
-    + `<div class="bar"><a class="btn" href="/api/content?${q}&download=1">Download</a>`
-    + ` <a class="btn" href="/translate?${q}" target="_blank">Translate (dry-run)</a></div>`
-    + '<pre id="preview" class="muted">Loading preview…</pre>';
-  const txt = await (await fetch('/api/content?' + q + '&preview=1')).text();
-  const pre = document.getElementById('preview');
-  pre.classList.remove('muted');
-  pre.textContent = txt;
-}
-
-// Auto-reload the page when the server process restarts (dev auto-reload).
-// Poll the boot id; a change means a new server process → reload.
-let bootId = null;
-async function checkBoot() {
-  try {
-    const b = await (await fetch('/api/bootid')).text();
-    if (bootId === null) bootId = b;
-    else if (b !== bootId) location.reload();
-  } catch (_) { /* server mid-restart; ignore and retry */ }
-}
-setInterval(checkBoot, 1500);
-checkBoot();
-
-loadList();
-</script>
-</body>
-</html>
-"""

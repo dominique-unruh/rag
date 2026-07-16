@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>rag db-browser</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.4 system-ui, sans-serif; height: 100vh; display: flex; }
+  nav { width: 160px; background: #1f2430; color: #cdd3df; flex: 0 0 160px; }
+  nav h1 { font-size: 14px; padding: 12px; margin: 0; color: #fff; border-bottom: 1px solid #333b4d; }
+  nav a { display: block; padding: 10px 12px; color: #cdd3df; text-decoration: none; cursor: pointer; }
+  nav a.active, nav a:hover { background: #2b3242; color: #fff; }
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #toolbar { flex: 0 0 auto; padding: 6px 8px; background: #eef1f7; border-bottom: 1px solid #ccd; }
+  #search { width: 100%; padding: 4px 8px; font: inherit; }
+  .view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .view[hidden] { display: none; }
+  .listpane { flex: 1 1 45%; overflow: auto; border-bottom: 2px solid #ccc; }
+  .detailpane { flex: 1 1 55%; overflow: auto; padding: 10px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #eee; white-space: nowrap;
+           overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
+  th { position: sticky; top: 0; z-index: 1; background: #f5f6f8; }
+  .listpane tr { cursor: pointer; scroll-margin-top: 34px; }
+  .listpane tr.sel { background: #dce7ff; }
+  .detailpane h2 { font-size: 14px; margin: 6px 0; }
+  .meta td:first-child { color: #555; width: 160px; font-weight: 600; }
+  pre { background: #f7f7f9; border: 1px solid #e2e2e6; padding: 8px; overflow: auto; max-height: 40vh; }
+  .bar { margin: 8px 0; }
+  a.btn { background: #2b6cff; color: #fff; padding: 5px 10px; border-radius: 4px; text-decoration: none; }
+  a.xref { color: #2b6cff; cursor: pointer; text-decoration: underline; }
+  ul.xrefs { margin: 4px 0; padding-left: 18px; }
+  .muted { color: #888; }
+  details { border: 1px solid #ddd; border-radius: 5px; padding: 6px 10px; margin: 8px 0; }
+  summary { font-weight: 600; cursor: pointer; }
+  #ctxmenu { position: fixed; z-index: 10; background: #fff; border: 1px solid #bbb;
+             box-shadow: 0 2px 8px rgba(0,0,0,.2); display: none; }
+  #ctxmenu div { padding: 6px 14px; cursor: pointer; white-space: nowrap; }
+  #ctxmenu div:hover { background: #2b6cff; color: #fff; }
+</style>
+</head>
+<body>
+<nav>
+  <h1>db-browser</h1>
+  <a data-view="extraction" class="active">Extraction</a>
+  <a data-view="translated">Translated</a>
+</nav>
+<main>
+  <div id="toolbar">
+    <input id="search" type="search" placeholder="Search rows — Enter: next, Shift+Enter: prev">
+  </div>
+  <div class="view" data-view="extraction">
+    <div class="listpane"><p class="muted" style="padding:10px">Loading…</p></div>
+    <div class="detailpane"><p class="muted">Select a row above.</p></div>
+  </div>
+  <div class="view" data-view="translated" hidden>
+    <div class="listpane"><p class="muted" style="padding:10px">Loading…</p></div>
+    <div class="detailpane"><p class="muted">Select a row above.</p></div>
+  </div>
+</main>
+<div id="ctxmenu">
+  <div data-act="translate">Translate (dry-run)</div>
+  <div data-act="copysql">Copy SQL</div>
+  <div data-act="copydel">Copy delete command</div>
+</div>
+<script>
+// --- small helpers -------------------------------------------------------
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function sqlLit(v) { return "'" + String(v).replace(/'/g, "''") + "'"; }
+function rowSql(st, id) {
+  return `FROM documents WHERE source_type = ${sqlLit(st)} AND doc_id = ${sqlLit(id)}`;
+}
+function shQuote(v) { return "'" + String(v).replace(/'/g, "'\\''") + "'"; }
+function rowDeleteCmd(st, id) {
+  return `./rag-cli maintenance delete extract ${shQuote(st)} ${shQuote(id)}`;
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); }
+  catch (_) {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); ta.remove();
+  }
+}
+// Render a key/value object as a metadata table.
+function metaTable(obj, links) {
+  const keys = Object.keys(obj);
+  if (!keys.length) return '<p class="muted">(none)</p>';
+  return '<table class="meta">' + keys.map(k => {
+    const raw = typeof obj[k] === 'object' ? JSON.stringify(obj[k]) : obj[k];
+    const href = links && links[k];
+    const cell = href ? `<a href="${esc(href)}">${esc(raw)}</a>` : esc(raw);
+    return `<tr><td>${esc(k)}</td><td>${cell}</td></tr>`;
+  }).join('') + '</table>';
+}
+
+// --- generic list/detail view controller --------------------------------
+function makeView(name, opts) {
+  const root = document.querySelector(`.view[data-view="${name}"]`);
+  const listEl = root.querySelector('.listpane');
+  const detailEl = root.querySelector('.detailpane');
+  const v = { name, listEl, detailEl, data: [], rows: [], sel: -1, loaded: false, key: null };
+
+  v.load = async function () {
+    v.data = await (await fetch(opts.listUrl)).json();
+    if (!v.data.length) {
+      listEl.innerHTML = '<p class="muted" style="padding:10px">Empty.</p>';
+      v.rows = []; v.loaded = true; return;
+    }
+    listEl.innerHTML = opts.renderList(v.data);
+    v.rows = Array.from(listEl.querySelectorAll('tbody tr'));
+    v.sel = -1;
+    v.rows.forEach((tr, i) => {
+      tr.onclick = () => v.select(i);
+      if (opts.onContext) {
+        tr.oncontextmenu = (e) => { e.preventDefault(); v.select(i); opts.onContext(v.data[i], e); };
+      }
+    });
+    v.loaded = true;
+  };
+
+  v.ensureLoaded = async function () { if (!v.loaded) await v.load(); };
+
+  v.select = function (i) {
+    if (!v.rows.length) return;
+    i = Math.max(0, Math.min(v.rows.length - 1, i));
+    if (v.sel >= 0 && v.rows[v.sel]) v.rows[v.sel].classList.remove('sel');
+    v.sel = i;
+    const tr = v.rows[i];
+    tr.classList.add('sel');
+    tr.scrollIntoView({ block: 'nearest' });
+    v.key = opts.keyOf(v.data[i]);
+    opts.showDetail(v.data[i], detailEl);
+    updateHash();
+  };
+
+  v.selectKey = async function (key) {
+    await v.ensureLoaded();
+    const idx = v.data.findIndex(d => String(opts.keyOf(d)) === String(key));
+    if (idx >= 0) v.select(idx);
+  };
+
+  v.match = (item, q) => opts.matchText(item).toLowerCase().includes(q);
+  v.pageStep = function () {
+    const rh = v.rows[0] ? v.rows[0].offsetHeight : 20;
+    return Math.max(1, Math.floor(listEl.clientHeight / rh) - 1);
+  };
+  return v;
+}
+
+// --- views ---------------------------------------------------------------
+const views = {};
+let activeView = 'extraction';
+
+views.extraction = makeView('extraction', {
+  listUrl: '/api/documents',
+  keyOf: r => r.source_type + '\\u0000' + r.doc_id,
+  matchText: r => [r.date, r.source_type, r.title, r.sender, r.mime_type, r.doc_id].join(' '),
+  renderList: items =>
+    '<table><thead><tr><th>date</th><th>source</th><th>title</th>'
+    + '<th>sender</th><th>mime</th><th>v</th></tr></thead><tbody>'
+    + items.map(r => `<tr><td>${esc(r.date)}</td><td>${esc(r.source_type)}</td>`
+        + `<td>${esc(r.title)}</td><td>${esc(r.sender)}</td>`
+        + `<td>${esc(r.mime_type)}</td><td>${esc(r.version)}</td></tr>`).join('')
+    + '</tbody></table>',
+  onContext: (item, e) => {
+    menuTarget = { st: item.source_type, id: item.doc_id };
+    menuEl.style.left = e.clientX + 'px';
+    menuEl.style.top = e.clientY + 'px';
+    menuEl.style.display = 'block';
+  },
+  showDetail: async (item, el) => {
+    const q = `source_type=${encodeURIComponent(item.source_type)}&doc_id=${encodeURIComponent(item.doc_id)}`;
+    const doc = await (await fetch('/api/document?' + q)).json();
+    const core = { source_type: doc.source_type, doc_id: doc.doc_id, version: doc.version,
+                   updated_at: doc.updated_at, blob_hash: doc.blob_hash };
+    const links = doc.source_url ? { doc_id: doc.source_url } : null;
+    let trs = '<p class="muted">(none)</p>';
+    if (doc.translations && doc.translations.length) {
+      trs = '<ul class="xrefs">' + doc.translations.map(t =>
+        `<li><a class="xref" data-set="${esc(t.id)}">set ${esc(t.id)} — v${esc(t.source_version)}`
+        + ` @ ${esc(t.translated_at)}${t.is_active ? ' (active)' : ''}</a></li>`).join('') + '</ul>';
+    }
+    el.innerHTML =
+        '<h2>Document</h2>' + metaTable(core, links)
+      + '<h2>Stable metadata</h2>' + metaTable(doc.stable)
+      + '<h2>Transient metadata</h2>' + metaTable(doc.transient)
+      + '<h2>Translations</h2>' + trs
+      + '<h2>Content</h2>'
+      + `<div class="bar"><a class="btn" href="/api/content?${q}&download=1">Download</a>`
+      + ` <a class="btn" href="/translate?${q}" target="_blank">Translate (dry-run)</a></div>`
+      + '<pre id="preview" class="muted">Loading preview…</pre>';
+    // Wire translation cross-links -> Translated view.
+    el.querySelectorAll('a.xref[data-set]').forEach(a => {
+      a.onclick = () => { switchView('translated'); views.translated.selectKey(a.dataset.set); };
+    });
+    const txt = await (await fetch('/api/content?' + q + '&preview=1')).text();
+    const pre = el.querySelector('#preview');
+    if (pre) { pre.classList.remove('muted'); pre.textContent = txt; }
+  },
+});
+
+views.translated = makeView('translated', {
+  listUrl: '/api/translations',
+  keyOf: r => String(r.id),
+  matchText: r => [r.translated_at, r.source_type, r.doc_id, r.translator].join(' '),
+  renderList: items =>
+    '<table><thead><tr><th>translated</th><th>source</th><th>doc_id</th>'
+    + '<th>translator</th><th>src v</th><th>parts</th><th>active</th></tr></thead><tbody>'
+    + items.map(r => `<tr><td>${esc(r.translated_at)}</td><td>${esc(r.source_type)}</td>`
+        + `<td>${esc(r.doc_id)}</td><td>${esc(r.translator)}</td>`
+        + `<td>${esc(r.source_version)}</td><td>${esc(r.parts)}</td>`
+        + `<td>${r.is_active ? '✓' : ''}</td></tr>`).join('')
+    + '</tbody></table>',
+  showDetail: async (item, el) => {
+    const set = await (await fetch('/api/translation?set_id=' + encodeURIComponent(item.id))).json();
+    const core = { id: set.id, source_type: set.source_type, doc_id: set.doc_id,
+                   source_version: set.source_version, translator: set.translator,
+                   translated_at: set.translated_at, git_rev: set.git_rev,
+                   is_active: set.is_active };
+    const parts = (set.parts || []).map(p =>
+      '<details open><summary>' + esc(p.part_key) + '</summary>'
+      + '<h4>sub_doc_id</h4><code>' + esc(JSON.stringify(p.sub_doc_id)) + '</code>'
+      + '<h4>metadata</h4>' + metaTable(p.metadata)
+      + '<h4>content</h4><pre>' + esc(p.text) + '</pre>'
+      + '</details>').join('');
+    el.innerHTML =
+        '<h2>Translation set</h2>' + metaTable(core)
+      + '<div class="bar">source document: <a class="xref" id="todoc">'
+        + esc(set.source_type) + ':' + esc(set.doc_id) + '</a></div>'
+      + '<h2>Parts</h2>' + (parts || '<p class="muted">(no parts)</p>');
+    // doc_id cross-link -> Extraction view.
+    const link = el.querySelector('#todoc');
+    if (link) link.onclick = () => {
+      switchView('extraction');
+      views.extraction.selectKey(set.source_type + '\\u0000' + set.doc_id);
+    };
+  },
+});
+
+// --- view switching ------------------------------------------------------
+function switchView(name) {
+  activeView = name;
+  document.querySelectorAll('.view').forEach(el => { el.hidden = (el.dataset.view !== name); });
+  document.querySelectorAll('nav a[data-view]').forEach(a =>
+    a.classList.toggle('active', a.dataset.view === name));
+  views[name].ensureLoaded();
+  updateHash();
+}
+document.querySelectorAll('nav a[data-view]').forEach(a => {
+  a.onclick = () => switchView(a.dataset.view);
+});
+
+// --- deep linking (#view=..&key=..) --------------------------------------
+function updateHash() {
+  const v = views[activeView];
+  const params = new URLSearchParams({ view: activeView });
+  if (v.key != null) params.set('key', v.key);
+  const h = '#' + params.toString();
+  if (location.hash !== h) history.replaceState(null, '', h);
+}
+async function applyHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  const view = p.get('view');
+  if (view && views[view]) {
+    switchView(view);
+    const key = p.get('key');
+    if (key) await views[view].selectKey(key);
+  }
+}
+window.addEventListener('hashchange', applyHash);
+
+// --- keyboard: arrows/page move selection in the active view -------------
+document.addEventListener('keydown', (e) => {
+  const move = { ArrowDown: 1, ArrowUp: -1, PageDown: 0, PageUp: 0 };
+  if (!(e.key in move)) return;
+  const v = views[activeView];
+  if (!v.rows.length || e.target.tagName === 'INPUT') return;
+  e.preventDefault();
+  let delta = move[e.key];
+  if (e.key === 'PageDown') delta = v.pageStep();
+  else if (e.key === 'PageUp') delta = -v.pageStep();
+  const base = v.sel < 0 ? (delta > 0 ? -1 : 0) : v.sel;
+  v.select(base + delta);
+});
+
+// --- search: jump to matching rows in the active view --------------------
+const searchEl = document.getElementById('search');
+function findNext(q, dir) {
+  q = q.trim().toLowerCase();
+  const v = views[activeView];
+  if (!q || !v.rows.length) return;
+  const n = v.rows.length;
+  const start = v.sel < 0 ? (dir > 0 ? -1 : 0) : v.sel;
+  for (let k = 1; k <= n; k++) {
+    const i = ((start + dir * k) % n + n) % n;
+    if (v.match(v.data[i], q)) { v.select(i); return; }
+  }
+}
+searchEl.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  findNext(searchEl.value, e.shiftKey ? -1 : 1);
+});
+
+// --- context menu (extraction rows only) ---------------------------------
+const menuEl = document.getElementById('ctxmenu');
+let menuTarget = null;
+function hideMenu() { menuEl.style.display = 'none'; menuTarget = null; }
+document.addEventListener('click', hideMenu);
+document.addEventListener('scroll', hideMenu, true);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideMenu(); });
+menuEl.querySelector('[data-act="copysql"]').onclick = (e) => {
+  e.stopPropagation();
+  if (menuTarget) copyText('SELECT * ' + rowSql(menuTarget.st, menuTarget.id));
+  hideMenu();
+};
+menuEl.querySelector('[data-act="copydel"]').onclick = (e) => {
+  e.stopPropagation();
+  if (menuTarget) copyText(rowDeleteCmd(menuTarget.st, menuTarget.id));
+  hideMenu();
+};
+menuEl.querySelector('[data-act="translate"]').onclick = (e) => {
+  e.stopPropagation();
+  if (menuTarget) {
+    const q = `source_type=${encodeURIComponent(menuTarget.st)}&doc_id=${encodeURIComponent(menuTarget.id)}`;
+    window.open('/translate?' + q, '_blank');
+  }
+  hideMenu();
+};
+
+// --- auto-reload when the dev server restarts ----------------------------
+let bootId = null;
+async function checkBoot() {
+  try {
+    const b = await (await fetch('/api/bootid')).text();
+    if (bootId === null) bootId = b;
+    else if (b !== bootId) location.reload();
+  } catch (_) { /* server mid-restart; ignore */ }
+}
+setInterval(checkBoot, 1500);
+checkBoot();
+
+// --- boot ----------------------------------------------------------------
+(async () => {
+  await views.extraction.ensureLoaded();
+  if (location.hash) await applyHash();
+})();
+</script>
+</body>
+</html>

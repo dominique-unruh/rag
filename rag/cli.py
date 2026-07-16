@@ -122,6 +122,7 @@ def _cmd_translate(args: argparse.Namespace) -> None:
         force=args.force,
         dry_run=args.dry_run,
         inspect=args.inspect,
+        verbose=args.verbose,
     )
     count = run_translation(config, options)
     # Report the outcome (inspection mode already printed the translations).

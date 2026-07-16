@@ -26,6 +26,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["rag"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"rag/maintenance/index.html" = "rag/maintenance/index.html"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
