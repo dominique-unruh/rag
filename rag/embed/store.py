@@ -12,6 +12,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from ..errors import ConfigError
+
 
 def _now_iso() -> str:
     """Return the current UTC time as an ISO-8601 string."""
@@ -49,6 +51,34 @@ class EmbedStore:
         """Bind to a connection and the embedding ``model_id`` being processed."""
         self._conn: sqlite3.Connection = conn
         self._model: str = model_id
+
+    def ensure_fingerprint(self, fingerprint: str) -> None:
+        """Guard against incompatible config changes for this model (PLAN §6).
+
+        On first use, records the model's config ``fingerprint``. On later runs,
+        raises :class:`ConfigError` if the current fingerprint differs — meaning
+        the model's index would be polluted with incompatible vectors. The fix is
+        to use a new model id, or wipe this model's collection + rows and re-embed.
+        """
+        row = self._conn.execute(
+            "SELECT fingerprint FROM embedding_models WHERE model = ?", (self._model,)
+        ).fetchone()
+        if row is None:
+            # First run for this model — remember its config.
+            with self._conn:
+                self._conn.execute(
+                    "INSERT INTO embedding_models (model, fingerprint, created_at) "
+                    "VALUES (?, ?, ?)",
+                    (self._model, fingerprint, _now_iso()),
+                )
+            return
+        if row["fingerprint"] != fingerprint:
+            raise ConfigError(
+                f"embedding model {self._model!r} config changed since it was first "
+                f"embedded (incompatible):\n  stored:  {row['fingerprint']}\n  current: "
+                f"{fingerprint}\nUse a new model id, or wipe this model's collection and "
+                f"its embeddings rows to re-embed from scratch."
+            )
 
     def select_docs(
         self,

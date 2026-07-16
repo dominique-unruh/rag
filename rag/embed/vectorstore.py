@@ -19,6 +19,10 @@ _DISTANCES: dict[str, models.Distance] = {
     "euclid": models.Distance.EUCLID,
 }
 
+# Named sparse vector used for sparse collections (Qdrant sparse vectors are
+# always named). IDF weighting is applied by the collection at query time.
+SPARSE_VECTOR_NAME: str = "text"
+
 
 class VectorStore:
     """Thin wrapper around an embedded Qdrant client, one collection per model."""
@@ -29,26 +33,38 @@ class VectorStore:
         path.mkdir(parents=True, exist_ok=True)
         self._client: QdrantClient = QdrantClient(path=str(path))
 
-    def ensure_collection(self, collection: str, dim: int, distance: str) -> None:
-        """Create ``collection`` with the given dimension/metric if it is absent.
+    def ensure_collection(self, collection: str, *, kind: str, dim: int, distance: str) -> None:
+        """Create ``collection`` for a dense or sparse model if it is absent.
 
-        If it already exists with a different vector size, raise — mixing dims in
-        one collection would corrupt retrieval (PLAN §6).
+        ``kind`` is ``"dense"`` or ``"sparse"``. A dense collection is checked for
+        a matching vector size on re-open (mixing dims corrupts retrieval, PLAN
+        §6); a sparse collection uses a named sparse vector with an IDF modifier.
         """
         if self._client.collection_exists(collection):
-            info = self._client.get_collection(collection)
-            existing = info.config.params.vectors.size  # type: ignore[union-attr]
-            if existing != dim:
-                raise ValueError(
-                    f"collection {collection!r} has dim {existing}, expected {dim}; "
-                    "use a fresh collection for a different model/dim"
-                )
+            if kind == "dense":
+                info = self._client.get_collection(collection)
+                existing = info.config.params.vectors.size  # type: ignore[union-attr]
+                if existing != dim:
+                    raise ValueError(
+                        f"collection {collection!r} has dim {existing}, expected {dim}; "
+                        "use a fresh collection for a different model/dim"
+                    )
             return
-        metric = _DISTANCES.get(distance.lower(), models.Distance.COSINE)
-        self._client.create_collection(
-            collection,
-            vectors_config=models.VectorParams(size=dim, distance=metric),
-        )
+        if kind == "sparse":
+            # Sparse vectors: no fixed size; IDF applied at query time.
+            self._client.create_collection(
+                collection,
+                vectors_config={},
+                sparse_vectors_config={
+                    SPARSE_VECTOR_NAME: models.SparseVectorParams(modifier=models.Modifier.IDF)
+                },
+            )
+        else:
+            metric = _DISTANCES.get(distance.lower(), models.Distance.COSINE)
+            self._client.create_collection(
+                collection,
+                vectors_config=models.VectorParams(size=dim, distance=metric),
+            )
 
     def replace_document(
         self, collection: str, source_type: str, doc_id: str, points: list[models.PointStruct]

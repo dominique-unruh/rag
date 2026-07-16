@@ -8,6 +8,7 @@ its index need.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -82,26 +83,40 @@ def chunk_params(config_raw: Mapping[str, Any]) -> tuple[int, int]:
     return size, overlap
 
 
+# Allowed backends per model type.
+_DENSE_BACKENDS: frozenset[str] = frozenset({"openai", "ollama"})
+_SPARSE_BACKENDS: frozenset[str] = frozenset({"bm25"})
+
+
 def _parse_model(entry: Mapping[str, Any]) -> ModelSpec:
     """Build a :class:`ModelSpec` from one config entry, validating required keys."""
     model_id = entry.get("id")
     if not model_id:
         raise ConfigError("each embedding model needs an 'id'")
-    backend = str(entry.get("backend", "openai"))
-    if backend not in ("openai", "ollama"):
-        raise ConfigError(f"model {model_id!r}: backend must be 'openai' or 'ollama'")
     model_type = str(entry.get("type", "dense"))
-    if model_type != "dense":
-        # Sparse/other types are designed for (PLAN §6) but not yet implemented.
-        raise ConfigError(f"model {model_id!r}: only type 'dense' is implemented")
-    if "dim" not in entry:
-        raise ConfigError(f"model {model_id!r}: 'dim' is required for a dense model")
+    if model_type not in ("dense", "sparse"):
+        raise ConfigError(f"model {model_id!r}: type must be 'dense' or 'sparse'")
+
+    if model_type == "dense":
+        backend = str(entry.get("backend", "openai"))
+        if backend not in _DENSE_BACKENDS:
+            raise ConfigError(f"model {model_id!r}: dense backend must be one of {sorted(_DENSE_BACKENDS)}")
+        if "dim" not in entry:
+            raise ConfigError(f"model {model_id!r}: 'dim' is required for a dense model")
+        dim = int(entry["dim"])
+    else:  # sparse
+        backend = str(entry.get("backend", "bm25"))
+        if backend not in _SPARSE_BACKENDS:
+            raise ConfigError(f"model {model_id!r}: sparse backend must be one of {sorted(_SPARSE_BACKENDS)}")
+        # Sparse vectors have no fixed dimension; dim is unused.
+        dim = 0
+
     return ModelSpec(
         id=str(model_id),
         type=model_type,
         backend=backend,
         model=str(entry.get("model", model_id)),
-        dim=int(entry["dim"]),
+        dim=dim,
         collection=str(entry.get("collection") or _collection_name(str(model_id))),
         distance=str(entry.get("distance", "cosine")),
         api_base=entry.get("api_base"),
@@ -128,6 +143,23 @@ def load_models(config_raw: Mapping[str, Any]) -> dict[str, ModelSpec]:
         spec = _parse_model(entry)
         models[spec.id] = spec
     return models
+
+
+def model_fingerprint(spec: ModelSpec) -> str:
+    """Return a canonical fingerprint of a model's *incompatibility-defining* config.
+
+    Includes only fields whose change makes existing stored vectors incompatible
+    or is baked immutably into the collection: the embedder ``model`` identity,
+    ``type`` (dense/sparse), ``dim`` and ``distance`` metric. Deliberately
+    excludes freely-changeable knobs: the query instruction (applied at query
+    time only, never to stored vectors), the transport (backend/host/api_base)
+    and the collection name.
+    """
+    return json.dumps(
+        {"model": spec.model, "type": spec.type, "dim": spec.dim, "distance": spec.distance},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def get_model(config_raw: Mapping[str, Any], model_id: str) -> ModelSpec:

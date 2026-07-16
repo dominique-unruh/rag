@@ -125,11 +125,28 @@ def _migration_0002(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL_EMBEDDINGS)
 
 
+def _migration_0003(conn: sqlite3.Connection) -> None:
+    """Create ``embedding_models`` — a per-model config fingerprint guard (PLAN §6).
+
+    Records the incompatibility-defining config of each embedding model (its
+    identity/type/dim/metric). The embed pass refuses to run if a model's current
+    config differs from what its collection was built with.
+    """
+    conn.executescript(
+        "CREATE TABLE embedding_models ("
+        "  model       TEXT NOT NULL PRIMARY KEY,"  # the model id
+        "  fingerprint TEXT NOT NULL,"              # canonical incompatibility fingerprint
+        "  created_at  TEXT NOT NULL"
+        ");"
+    )
+
+
 # Ordered list of migrations. Index i (0-based) upgrades user_version from i to
 # i+1. Appending a new migration is the only supported way to change the schema.
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migration_0001,
     _migration_0002,
+    _migration_0003,
 ]
 
 

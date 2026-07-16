@@ -35,9 +35,9 @@ build on it — this is a from-scratch rewrite.
   - `markdown.py` — HTML→Markdown (markdownify).
   - `translators/` — one file per translator (`dispatch`, `email`, `text`, `pdf`); each exposes `translator = <Class>()`.
 - `rag/embed/` — module 3:
-  - `models.py` — embedding model registry (`ModelSpec`; backends `openai` / `ollama`).
-  - `backends.py` — embed via OpenAI-compatible or native Ollama (stdlib HTTP).
-  - `chunk.py` — character chunking; `vectorstore.py` — embedded Qdrant, one collection per model.
+  - `models.py` — embedding model registry (`ModelSpec`; dense backends `openai`/`ollama`, sparse backend `bm25`).
+  - `backends.py` — dense embed via OpenAI-compatible or native Ollama (stdlib HTTP); `sparse.py` — local BM25 term-frequency vectors.
+  - `chunk.py` — character chunking; `vectorstore.py` — embedded Qdrant, one collection per model (dense `VectorParams`, sparse IDF).
   - `store.py` — `EmbedStore`: select active sets needing embed (per model), record `embeddings` rows.
   - `pipeline.py` — `run_embed`: chunk + embed + replace points + bookkeeping.
 - `rag/maintenance/` — `db-browser` (Flask web UI), `delete` (cascading store API).

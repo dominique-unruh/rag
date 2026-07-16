@@ -80,11 +80,11 @@ def _config(storage: Path) -> Config:
     return Config({"storage": {"dir": str(storage)}, "embedding": _EMB_CFG}, storage / "config.yaml")
 
 
-def _vector_count(storage: Path) -> int:
-    """Open the vector store and count points in the test collection."""
+def _vector_count(storage: Path, collection: str = "emb_test") -> int:
+    """Open the vector store and count points in ``collection``."""
     vs = VectorStore(storage / "qdrant")
     try:
-        return vs.count("emb_test")
+        return vs.count(collection)
     finally:
         vs.close()
 
@@ -127,6 +127,58 @@ def test_embed_reembeds_on_new_active_set(tmp_path: Path) -> None:
     assert run_embed(config, EmbedOptions(model="test"), db=db, embed_fn=_FAKE) == 1
     # "short" is one chunk -> the old 2 points were replaced by 1.
     assert _vector_count(storage) == 1
+    db.close()
+
+
+# Sparse (BM25) embedding config — no backend service needed.
+_SPARSE_CFG = {
+    "chunk_size": 20, "chunk_overlap": 5,
+    "models": [{"id": "sp", "type": "sparse", "backend": "bm25"}],
+}
+
+
+def test_sparse_model_registry() -> None:
+    """A sparse model parses; dim is 0/unused; bad sparse backend raises."""
+    spec = get_model({"embedding": _SPARSE_CFG}, "sp")
+    assert spec.type == "sparse" and spec.backend == "bm25" and spec.dim == 0
+    with pytest.raises(ConfigError):
+        load_models({"embedding": {"models": [{"id": "x", "type": "sparse", "backend": "ollama"}]}})
+
+
+def test_embed_sparse_pipeline(tmp_path: Path) -> None:
+    """Sparse embedding stores BM25 term-frequency vectors locally (no service)."""
+    storage = tmp_path / "s"
+    db = _seed(storage)
+    config = Config({"storage": {"dir": str(storage)}, "embedding": _SPARSE_CFG},
+                    storage / "config.yaml")
+    # No embed_fn needed — sparse vectors are computed locally.
+    assert run_embed(config, EmbedOptions(model="sp"), db=db) == 1
+    assert _vector_count(storage, "emb_sp") == 2
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM embeddings WHERE model='sp'").fetchone()[0] == 1
+    # Idempotent.
+    assert run_embed(config, EmbedOptions(model="sp"), db=db) == 0
+    db.close()
+
+
+def test_fingerprint_guard(tmp_path: Path) -> None:
+    """Changing a model's incompatibility-defining config is refused; safe knobs pass."""
+    storage = tmp_path / "s"
+    db = _seed(storage)
+    run_embed(_config(storage), EmbedOptions(model="test"), db=db, embed_fn=_FAKE)
+
+    # Change the underlying model (same id) -> fingerprint mismatch -> refused.
+    changed = dict(_EMB_CFG)
+    changed["models"] = [dict(_EMB_CFG["models"][0], model="other")]
+    bad = Config({"storage": {"dir": str(storage)}, "embedding": changed}, storage / "c.yaml")
+    with pytest.raises(ConfigError):
+        run_embed(bad, EmbedOptions(model="test"), db=db, embed_fn=_FAKE)
+
+    # Changing only the query instruction is safe (query-time only) -> no error.
+    safe = dict(_EMB_CFG)
+    safe["models"] = [dict(_EMB_CFG["models"][0], query_instruction="Query: ")]
+    ok = Config({"storage": {"dir": str(storage)}, "embedding": safe}, storage / "c.yaml")
+    assert run_embed(ok, EmbedOptions(model="test", force=True), db=db, embed_fn=_FAKE) == 1
     db.close()
 
 

@@ -20,9 +20,10 @@ from ..db import Database
 from ..secrets import Secrets
 from .backends import embed_texts
 from .chunk import chunk_text
-from .models import ModelSpec, chunk_params, get_model
+from .models import ModelSpec, chunk_params, get_model, model_fingerprint
+from .sparse import sparse_vector
 from .store import DocRecord, EmbedStore
-from .vectorstore import VectorStore
+from .vectorstore import SPARSE_VECTOR_NAME, VectorStore
 
 # Filenames/subdirs under the storage directory.
 _DB_FILENAME: str = "metadata.db"
@@ -67,6 +68,26 @@ def _point_id(model_id: str, part_id: int, chunk_index: int) -> str:
     return str(uuid.uuid5(_POINT_NS, f"{model_id}:{part_id}:{chunk_index}"))
 
 
+def _chunk_vector(spec: ModelSpec, chunks: list[str], embed: EmbedFn) -> list[object]:
+    """Return the per-chunk vectors for ``chunks`` in the model's representation.
+
+    Dense: fixed-length float vectors from the backend. Sparse: locally-computed
+    term-frequency sparse vectors (named for Qdrant), no external call.
+    """
+    if spec.type == "sparse":
+        vectors: list[object] = []
+        for chunk in chunks:
+            counts = sparse_vector(chunk)
+            vectors.append(
+                {SPARSE_VECTOR_NAME: models.SparseVector(
+                    indices=list(counts.keys()), values=list(counts.values())
+                )}
+            )
+        return vectors
+    # Dense: one float vector per chunk from the backend.
+    return list(embed(chunks))
+
+
 def _embed_document(
     doc: DocRecord, spec: ModelSpec, blobs: BlobStore, embed: EmbedFn, chunk_size: int, overlap: int
 ) -> list[models.PointStruct]:
@@ -79,8 +100,8 @@ def _embed_document(
             # Empty part (e.g. an image-only PDF) — no points, but the part is
             # still recorded as embedded so it is not reselected forever.
             continue
-        vectors = embed(chunks)
-        for index, (chunk, vector) in enumerate(zip(chunks, vectors)):
+        vectors = _chunk_vector(spec, chunks, embed)
+        for index, vector in enumerate(vectors):
             points.append(
                 models.PointStruct(
                     id=_point_id(spec.id, part.part_id, index),
@@ -124,8 +145,10 @@ def run_embed(
     owns_db = db is None
     database = db if db is not None else Database.open(storage / _DB_FILENAME)
     try:
-        vectors.ensure_collection(spec.collection, spec.dim, spec.distance)
         store = EmbedStore(database.conn, spec.id)
+        # Guard first: refuse if the model's incompatibility-defining config changed.
+        store.ensure_fingerprint(model_fingerprint(spec))
+        vectors.ensure_collection(spec.collection, kind=spec.type, dim=spec.dim, distance=spec.distance)
         processed = 0
         for doc in store.select_docs(
             source_type=options.source_type,
