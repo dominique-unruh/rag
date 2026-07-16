@@ -11,7 +11,17 @@ from rag.extract.plugins.email import (
     _clean_address_list,
     _decode_mime_words,
 )
-from rag.extract.plugins.email.imap import _list_folders, _truthy
+from rag.extract.plugins.email.imap import _list_folders, _looks_like_email, _truthy
+
+
+def test_looks_like_email() -> None:
+    """Real emails are accepted; header-less garbage is rejected."""
+    good = message_from_string("From: a@x\r\nSubject: Hi\r\n\r\nbody")
+    with_msgid = message_from_string("Message-ID: <m@x>\r\n\r\nbody")
+    garbage = message_from_string("\x01\x02 random binary-ish payload no headers")
+    assert _looks_like_email(good)
+    assert _looks_like_email(with_msgid)
+    assert not _looks_like_email(garbage)
 
 
 def test_truthy() -> None:

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# PYTHON_ARGCOMPLETE_OK
 # Convenience launcher for the rag CLI without a manual install step.
 # Ensures a venv with the required dependencies exists, then runs the CLI
 # against the in-repo source.
@@ -24,7 +25,7 @@ fi
 # with --system-site-packages can satisfy imports from system packages while its
 # own site remains empty.
 _SENTINEL="$VENV/.rag-deps-installed"
-_DEPS=(pyyaml keyring secretstorage jeepney flask)
+_DEPS=(pyyaml keyring secretstorage jeepney flask argcomplete)
 if [ ! -f "$_SENTINEL" ]; then
     echo "rag-cli: installing dependencies into $VENV ..." >&2
     if command -v uv >/dev/null 2>&1; then

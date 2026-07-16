@@ -8,6 +8,7 @@ dependencies = [
     "pyyaml",
     "keyring",
     "flask",
+    "argcomplete",
 ]
 
 [project.optional-dependencies]

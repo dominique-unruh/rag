@@ -175,7 +175,7 @@ def _create_app(database: IdleDatabase, blobs: BlobStore) -> Flask:
         rows = database.query(
             "SELECT source_type, doc_id, version, updated_at, date, mime_type, "
             "json(stable_metadata) AS stable FROM documents "
-            "ORDER BY date DESC, updated_at DESC"
+            "ORDER BY updated_at DESC"
         )
         return jsonify([_display_row(r) for r in rows])
 
@@ -248,12 +248,15 @@ def serve(
     app = _create_app(database, blobs)
     url = f"http://{host}:{port}/"
     # The reloader runs a parent supervisor plus the actual serving child (marked
-    # by WERKZEUG_RUN_MAIN); print/open the browser only in the serving child.
-    if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+    # by WERKZEUG_RUN_MAIN, re-spawned on every source change).
+    is_reloader_child = os.environ.get("WERKZEUG_RUN_MAIN") == "true"
+    if is_reloader_child:
+        # The child (re)binds the port on start and each reload.
         print(f"db-browser serving at {url} (Ctrl-C to stop, auto-reloads on source changes)")
-        if open_browser:
-            # Open shortly after the server starts accepting connections.
-            threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    elif open_browser:
+        # Open the browser ONCE, from the supervisor — it is not re-run on reload,
+        # so reloads do not spawn new windows. Delay lets the child bind the port.
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     try:
         # Werkzeug's file-watching auto-reload is always enabled.
         app.run(host=host, port=port, threaded=True, use_reloader=True)
@@ -275,13 +278,16 @@ _INDEX_HTML: str = """<!doctype html>
   nav a { display: block; padding: 10px 12px; color: #cdd3df; text-decoration: none; cursor: pointer; }
   nav a.active, nav a:hover { background: #2b3242; color: #fff; }
   main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #toolbar { flex: 0 0 auto; padding: 6px 8px; background: #eef1f7; border-bottom: 1px solid #ccd; }
+  #search { width: 100%; padding: 4px 8px; font: inherit; }
   #list { flex: 1 1 45%; overflow: auto; border-bottom: 2px solid #ccc; }
   #detail { flex: 1 1 55%; overflow: auto; padding: 10px; }
   table { border-collapse: collapse; width: 100%; }
   th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #eee; white-space: nowrap;
            overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
-  th { position: sticky; top: 0; background: #f5f6f8; }
-  #list tr { cursor: pointer; }
+  th { position: sticky; top: 0; z-index: 1; background: #f5f6f8; }
+  /* Keep rows clear of the sticky header when scrolled into view. */
+  #list tr { cursor: pointer; scroll-margin-top: 34px; }
   #list tr.sel { background: #dce7ff; }
   #detail h2 { font-size: 14px; margin: 6px 0; }
   .meta td:first-child { color: #555; width: 160px; font-weight: 600; }
@@ -301,10 +307,16 @@ _INDEX_HTML: str = """<!doctype html>
   <a class="active" data-tool="extraction">Extraction</a>
 </nav>
 <main>
+  <div id="toolbar">
+    <input id="search" type="search" placeholder="Search rows — Enter: next, Shift+Enter: prev">
+  </div>
   <div id="list"><p class="muted" style="padding:10px">Loading…</p></div>
   <div id="detail"><p class="muted">Select a row above.</p></div>
 </main>
-<div id="ctxmenu"><div data-act="copysql">Copy SQL</div></div>
+<div id="ctxmenu">
+  <div data-act="copysql">Copy SQL</div>
+  <div data-act="copydel">Copy delete command</div>
+</div>
 <script>
 const listEl = document.getElementById('list');
 const detailEl = document.getElementById('detail');
@@ -323,6 +335,15 @@ function sqlLit(v) { return "'" + String(v).replace(/'/g, "''") + "'"; }
 // `SELECT * <clause>` returns that row.
 function rowSql(st, id) {
   return `FROM documents WHERE source_type = ${sqlLit(st)} AND doc_id = ${sqlLit(id)}`;
+}
+
+// Quote a value as a single POSIX shell argument (single-quoted, embedded
+// quotes closed/escaped/reopened).
+function shQuote(v) { return "'" + String(v).replace(/'/g, "'\\''") + "'"; }
+
+// The rag-cli command that deletes this item via the cascading store API.
+function rowDeleteCmd(st, id) {
+  return `./rag-cli maintenance delete extract ${shQuote(st)} ${shQuote(id)}`;
 }
 
 // Hide the context menu.
@@ -348,6 +369,13 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideMenu()
 menuEl.querySelector('[data-act="copysql"]').onclick = (e) => {
   e.stopPropagation();
   if (menuTarget) copyText(rowSql(menuTarget.st, menuTarget.id));
+  hideMenu();
+};
+
+// "Copy delete command" action.
+menuEl.querySelector('[data-act="copydel"]').onclick = (e) => {
+  e.stopPropagation();
+  if (menuTarget) copyText(rowDeleteCmd(menuTarget.st, menuTarget.id));
   hideMenu();
 };
 
@@ -391,14 +419,42 @@ function applyHash() {
 // Follow the hash when the user pastes/edits a deep link.
 window.addEventListener('hashchange', applyHash);
 
-// Arrow up/down move the selection (when the list has rows).
+// Arrow up/down move the selection (when the list has rows). Ignored while
+// typing in an input so the search field's caret keys still work.
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-  if (!rowEls.length) return;
+  if (!rowEls.length || e.target.tagName === 'INPUT') return;
   e.preventDefault();
   // Start from the top on first keypress if nothing is selected yet.
   const base = selIndex < 0 ? (e.key === 'ArrowDown' ? -1 : 0) : selIndex;
   selectRow(base + (e.key === 'ArrowDown' ? 1 : -1));
+});
+
+// --- search: jump to rows whose text (or doc_id) contains the query ---
+const searchEl = document.getElementById('search');
+
+// Whether a row matches the (lowercased) query across its visible text + doc_id.
+function rowMatches(tr, q) {
+  return (tr.textContent + ' ' + tr.dataset.id).toLowerCase().includes(q);
+}
+
+// Select the next (dir=1) or previous (dir=-1) row matching q, wrapping around.
+function findNext(q, dir) {
+  q = q.trim().toLowerCase();
+  if (!q || !rowEls.length) return;
+  const n = rowEls.length;
+  const start = selIndex < 0 ? (dir > 0 ? -1 : 0) : selIndex;
+  for (let k = 1; k <= n; k++) {
+    const i = ((start + dir * k) % n + n) % n;
+    if (rowMatches(rowEls[i], q)) { selectRow(i); return; }
+  }
+}
+
+// Enter jumps to the next match; Shift+Enter to the previous one.
+searchEl.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  findNext(searchEl.value, e.shiftKey ? -1 : 1);
 });
 
 // Load the document list into the top half.

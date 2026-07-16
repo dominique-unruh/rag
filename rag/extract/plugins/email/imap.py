@@ -27,6 +27,11 @@ from ...base import Store
 _DEFAULT_SSL_PORT: int = 993
 _DEFAULT_PLAIN_PORT: int = 143
 
+# Socket timeout (seconds) for IMAP operations, so a wedged/unresponsive server
+# raises instead of hanging the run forever. Overridable per account via
+# ``timeout`` in the config.
+_DEFAULT_TIMEOUT: float = 30.0
+
 # Regex parsing an IMAP LIST response line: `(flags) "delim" name`. The name is
 # the trailing field — a quoted string (may contain spaces) or a bare atom. The
 # delimiter is a quoted char or NIL.
@@ -74,9 +79,13 @@ def _connect(account: Mapping[str, Any], password: str) -> imaplib.IMAP4:
     # Default the port based on transport unless explicitly configured.
     port = int(account.get("port", _DEFAULT_SSL_PORT if use_ssl else _DEFAULT_PLAIN_PORT))
     username = str(account.get("username", account["account-id"]))
+    # Socket timeout so a stalled server raises instead of hanging forever.
+    timeout = float(account.get("timeout", _DEFAULT_TIMEOUT))
     # Choose the SSL or plaintext client accordingly.
     client: imaplib.IMAP4 = (
-        imaplib.IMAP4_SSL(host, port) if use_ssl else imaplib.IMAP4(host, port)
+        imaplib.IMAP4_SSL(host, port, timeout=timeout)
+        if use_ssl
+        else imaplib.IMAP4(host, port, timeout=timeout)
     )
     client.login(username, password)
     return client
@@ -233,6 +242,16 @@ def _fetch_message(client: imaplib.IMAP4, uid: int) -> tuple[bytes, bool] | None
     # \Seen appearing in the FETCH header means the message is marked read.
     is_read = b"\\Seen" in header_line
     return bytes(raw), is_read
+
+
+def _looks_like_email(msg: Any) -> bool:
+    """Return whether ``msg`` looks like a real RFC822 email.
+
+    Garbage bytes (e.g. from a desynced IMAP connection) parse into a header-less
+    :class:`email.message.Message`; a genuine email always carries at least a
+    ``Message-ID`` or ``From`` header. Used to reject non-messages before storing.
+    """
+    return bool(msg.get("Message-ID") or msg.get("From"))
 
 
 def _message_id(raw: bytes, uidvalidity: int, uid: int) -> tuple[str, Any]:
@@ -469,6 +488,16 @@ def _sync_folder(
             continue
         raw, is_read = fetched
         doc_id, parsed = _message_id(raw, validity, uid)
+        # Guard: refuse to persist bytes that are not a real email (e.g. garbage
+        # from a desynced IMAP connection). Mark the UID seen so it is not
+        # re-fetched, and skip without consuming the fetch budget.
+        if not _looks_like_email(parsed):
+            print(
+                f"warning: UID {uid} in [{folder}] is not a parseable email; skipping",
+                file=sys.stderr,
+            )
+            known[str(uid)] = doc_id
+            continue
         # Build both metadata sets and upsert. Duplicate message-ids are fine
         # (exist_ok default True); an unchanged body just refreshes transient.
         stable = build_stable_metadata(parsed)
