@@ -21,8 +21,10 @@ import threading
 import time
 import uuid
 import webbrowser
+from contextlib import contextmanager
 from html import escape as _h
 from pathlib import Path
+from typing import Iterator
 from typing import Any
 
 from flask import Flask, Response, jsonify, request
@@ -34,6 +36,67 @@ from ..config import Config
 # source change, giving a new id — the main page polls it and reloads when it
 # changes, so the browser follows the auto-reload.
 _BOOT_ID: str = uuid.uuid4().hex
+
+# Serialises access to the embedded Qdrant store (single-process). The browser
+# opens it per request under this lock and releases it, so an `embed` run can
+# take the store's own lock whenever the browser is idle (PLAN §9).
+_QDRANT_LOCK: threading.Lock = threading.Lock()
+
+
+@contextmanager
+def _open_qdrant(qdrant_path: Path) -> "Iterator[Any]":
+    """Open the embedded Qdrant store for one operation, then close it.
+
+    Guarded by a process-wide lock (embedded Qdrant is single-access) and closed
+    on exit so the lock/dir is free between requests.
+    """
+    from qdrant_client import QdrantClient
+
+    with _QDRANT_LOCK:
+        client = QdrantClient(path=str(qdrant_path))
+        try:
+            yield client
+        finally:
+            client.close()
+
+
+# Max hits returned per model for an embedding query.
+_QUERY_LIMIT: int = 25
+
+
+def _entry_dict(point_id: object, model: str, payload: dict | None, score: float | None) -> dict[str, Any]:
+    """Project a Qdrant point into the flat entry dict the UI shows."""
+    payload = payload or {}
+    return {
+        "id": str(point_id),
+        "model": model,
+        "score": score,
+        "source_type": payload.get("source_type"),
+        "doc_id": payload.get("doc_id"),
+        "set_id": payload.get("set_id"),
+        "part_id": payload.get("part_id"),
+        "chunk": payload.get("chunk"),
+    }
+
+
+def _payload_filter(*, source_type: str, doc_id: str, set_id: int) -> Any:
+    """Build a Qdrant filter matching one translation set's points."""
+    from qdrant_client import models as qm
+
+    return qm.Filter(
+        must=[
+            qm.FieldCondition(key="source_type", match=qm.MatchValue(value=source_type)),
+            qm.FieldCondition(key="doc_id", match=qm.MatchValue(value=doc_id)),
+            qm.FieldCondition(key="set_id", match=qm.MatchValue(value=set_id)),
+        ]
+    )
+
+
+def models_sparse(counts: dict[int, float]) -> Any:
+    """Build a Qdrant sparse query vector from a ``{term-id: weight}`` map."""
+    from qdrant_client import models as qm
+
+    return qm.SparseVector(indices=list(counts.keys()), values=list(counts.values()))
 
 # Seconds of inactivity after which the shared DB connection is closed.
 _IDLE_SECONDS: float = 5.0
@@ -235,13 +298,15 @@ def _download_name(doc_id: str, mime: str | None) -> str:
     return safe if ext and safe.endswith(ext) else safe + ext
 
 
-def _create_app(database: IdleDatabase, blobs: BlobStore) -> Flask:
-    """Build the Flask app with the extraction-browser routes.
+def _create_app(database: IdleDatabase, blobs: BlobStore, config: Config) -> Flask:
+    """Build the Flask app with the browser routes.
 
-    ``database``/``blobs`` are captured by the route closures; keeping them out of
-    module globals lets the app be created fresh (e.g. by the reloader child).
+    ``database``/``blobs``/``config`` are captured by the route closures; keeping
+    them out of module globals lets the app be created fresh (reloader child).
     """
     app = Flask(__name__)
+    # Embedding config: model registry + the embedded Qdrant store location.
+    qdrant_path = config.storage_dir / "qdrant"
 
     def fetch_doc() -> sqlite3.Row | None:
         """Fetch the document identified by the request's source_type/doc_id args."""
@@ -254,6 +319,20 @@ def _create_app(database: IdleDatabase, blobs: BlobStore) -> Flask:
             (source_type, doc_id),
         )
         return rows[0] if rows else None
+
+    def fill_sub_doc_ids(entries: list[dict[str, Any]]) -> None:
+        """Add each entry's ``sub_doc_id`` by resolving its ``part_id`` in the DB."""
+        ids = sorted({e["part_id"] for e in entries if e.get("part_id") is not None})
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        rows = database.query(
+            f"SELECT id, json(sub_doc_id) AS sub FROM translation_parts WHERE id IN ({placeholders})",
+            tuple(ids),
+        )
+        submap = {r["id"]: json.loads(r["sub"]) for r in rows}
+        for entry in entries:
+            entry["sub_doc_id"] = submap.get(entry["part_id"])
 
     @app.get("/")
     def index() -> Response:
@@ -442,6 +521,132 @@ def _create_app(database: IdleDatabase, blobs: BlobStore) -> Flask:
         )
         return Response(html, mimetype="text/html; charset=utf-8")
 
+    # --- embedding endpoints ---------------------------------------------
+    @app.get("/api/embed_models")
+    def api_embed_models() -> Response:
+        """Return the configured embedding models (id + type)."""
+        from ..embed.models import load_models
+
+        models_by_id = load_models(config.raw)
+        return jsonify([{"id": s.id, "type": s.type} for s in models_by_id.values()])
+
+    @app.get("/api/embed_query")
+    def api_embed_query() -> Response:
+        """Run a query against the selected models and return scored entries.
+
+        Empty query -> no results. Each result carries its point id, model, score
+        and payload (source_type/doc_id/set_id/part_id/chunk). Per-model failures
+        (e.g. a dense backend being down) are collected into ``errors``.
+        """
+        from ..embed.backends import embed_texts
+        from ..embed.models import load_models
+        from ..embed.sparse import sparse_vector
+        from ..embed.vectorstore import SPARSE_VECTOR_NAME
+
+        query = request.args.get("q", "").strip()
+        if not query:
+            return jsonify({"results": [], "errors": []})
+        registry = load_models(config.raw)
+        requested = request.args.get("models", "")
+        wanted = [m for m in requested.split(",") if m] or list(registry)
+        results: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for model_id in wanted:
+            spec = registry.get(model_id)
+            if spec is None:
+                errors.append(f"unknown model {model_id}")
+                continue
+            try:
+                with _open_qdrant(qdrant_path) as client:
+                    if not client.collection_exists(spec.collection):
+                        continue
+                    if spec.type == "sparse":
+                        counts = sparse_vector(query)
+                        hits = client.query_points(
+                            spec.collection,
+                            query=models_sparse(counts),
+                            using=SPARSE_VECTOR_NAME,
+                            limit=_QUERY_LIMIT,
+                            with_payload=True,
+                        ).points
+                    else:
+                        vector = embed_texts(spec, [query], is_query=True)[0]
+                        hits = client.query_points(
+                            spec.collection, query=vector, limit=_QUERY_LIMIT, with_payload=True
+                        ).points
+                for h in hits:
+                    results.append(_entry_dict(h.id, spec.id, h.payload, h.score))
+            except Exception as exc:  # per-model failure shouldn't kill the whole query
+                errors.append(f"{model_id}: {exc}")
+        # Highest score first (scores are per-model; the model column disambiguates).
+        results.sort(key=lambda r: r["score"] if r["score"] is not None else -1e9, reverse=True)
+        fill_sub_doc_ids(results)
+        return jsonify({"results": results, "errors": errors})
+
+    @app.get("/api/embed_entry")
+    def api_embed_entry() -> Response:
+        """Fetch one embedding entry by its point id (no query/embedding).
+
+        Searches every model's collection for the id (ids are unique per model).
+        Used by ``#id:<id>`` deep links.
+        """
+        from ..embed.models import load_models
+
+        point_id = request.args.get("id", "")
+        if not point_id:
+            return _not_found("missing id")
+        registry = load_models(config.raw)
+        with _open_qdrant(qdrant_path) as client:
+            for spec in registry.values():
+                if not client.collection_exists(spec.collection):
+                    continue
+                found = client.retrieve(spec.collection, ids=[point_id], with_payload=True)
+                if found:
+                    entry = _entry_dict(found[0].id, spec.id, found[0].payload, None)
+                    fill_sub_doc_ids([entry])
+                    return jsonify({"results": [entry], "errors": []})
+        return jsonify({"results": [], "errors": []})
+
+    @app.get("/api/translation_embeddings")
+    def api_translation_embeddings() -> Response:
+        """Return the embedding entries (points) for a translation set, across models."""
+        from ..embed.models import load_models
+
+        set_id = request.args.get("set_id", "")
+        sets = database.query(
+            "SELECT source_type, doc_id FROM translation_sets WHERE id = ?", (set_id,)
+        )
+        if not sets:
+            return jsonify([])
+        source_type, doc_id = sets[0]["source_type"], sets[0]["doc_id"]
+        # Map part_id -> sub_doc_id so entries show the readable part, not a row id.
+        submap = {
+            r["id"]: json.loads(r["sub"])
+            for r in database.query(
+                "SELECT id, json(sub_doc_id) AS sub FROM translation_parts WHERE set_id = ?",
+                (set_id,),
+            )
+        }
+        registry = load_models(config.raw)
+        entries: list[dict[str, Any]] = []
+        try:
+            with _open_qdrant(qdrant_path) as client:
+                flt = _payload_filter(source_type=source_type, doc_id=doc_id, set_id=int(set_id))
+                for spec in registry.values():
+                    if not client.collection_exists(spec.collection):
+                        continue
+                    points, _ = client.scroll(
+                        spec.collection, scroll_filter=flt, with_payload=True, limit=1000
+                    )
+                    for p in points:
+                        entry = _entry_dict(p.id, spec.id, p.payload, None)
+                        entry["sub_doc_id"] = submap.get(entry["part_id"])
+                        entries.append(entry)
+        except Exception:
+            # Vector store busy/unavailable (e.g. an embed run holds it): show none.
+            return jsonify([])
+        return jsonify(entries)
+
     def _not_found(message: str = "document not found") -> Response:
         """Return a 404 JSON error."""
         response = jsonify({"error": message})
@@ -463,7 +668,7 @@ def serve(
     storage = config.storage_dir
     database = IdleDatabase(storage / "metadata.db")
     blobs = BlobStore(storage / "blobs")
-    app = _create_app(database, blobs)
+    app = _create_app(database, blobs, config)
     url = f"http://{host}:{port}/"
     # The reloader runs a parent supervisor plus the actual serving child (marked
     # by WERKZEUG_RUN_MAIN, re-spawned on every source change).
@@ -476,8 +681,14 @@ def serve(
         # so reloads do not spawn new windows. Delay lets the child bind the port.
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     try:
-        # Werkzeug's file-watching auto-reload is always enabled.
-        app.run(host=host, port=port, threaded=True, use_reloader=True)
+        # Werkzeug's file-watching auto-reload is always enabled. It watches
+        # Python source by default; also watch the SPA template so editing the
+        # HTML/JS triggers a reload (it lives in a .html file, not a .py string).
+        index_html = Path(__file__).parent / "index.html"
+        app.run(
+            host=host, port=port, threaded=True,
+            use_reloader=True, extra_files=[str(index_html)],
+        )
     finally:
         database.close()
 

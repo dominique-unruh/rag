@@ -13,6 +13,10 @@
   main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   #toolbar { flex: 0 0 auto; padding: 6px 8px; background: #eef1f7; border-bottom: 1px solid #ccd; }
   #search { width: 100%; padding: 4px 8px; font: inherit; }
+  .embctl { flex: 0 0 auto; padding: 6px 8px; background: #f0f4ff; border-bottom: 1px solid #ccd;
+            display: flex; gap: 10px; align-items: center; }
+  #emb-q { flex: 1; padding: 4px 8px; font: inherit; }
+  #emb-models label { margin-right: 8px; white-space: nowrap; }
   .view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
   .view[hidden] { display: none; }
   .listpane { flex: 1 1 45%; overflow: auto; border-bottom: 2px solid #ccc; }
@@ -45,6 +49,7 @@
   <h1>db-browser</h1>
   <a data-view="extraction" class="active">Extraction</a>
   <a data-view="translated">Translated</a>
+  <a data-view="embedding">Embedding</a>
 </nav>
 <main>
   <div id="toolbar">
@@ -56,6 +61,15 @@
   </div>
   <div class="view" data-view="translated" hidden>
     <div class="listpane"><p class="muted" style="padding:10px">Loading…</p></div>
+    <div class="detailpane"><p class="muted">Select a row above.</p></div>
+  </div>
+  <div class="view" data-view="embedding" hidden>
+    <div class="embctl">
+      <input id="emb-q" type="search"
+             placeholder="Query — Enter to search selected models; or #id:&lt;point-id&gt; for an exact entry">
+      <span id="emb-models" class="muted">models: …</span>
+    </div>
+    <div class="listpane"><p class="muted" style="padding:10px">Enter a query above.</p></div>
     <div class="detailpane"><p class="muted">Select a row above.</p></div>
   </div>
 </main>
@@ -106,7 +120,7 @@ function makeView(name, opts) {
   const v = { name, listEl, detailEl, data: [], rows: [], sel: -1, loaded: false, key: null };
 
   v.load = async function () {
-    v.data = await (await fetch(opts.listUrl)).json();
+    v.data = await opts.fetchData();
     if (!v.data.length) {
       listEl.innerHTML = '<p class="muted" style="padding:10px">Empty.</p>';
       v.rows = []; v.loaded = true; return;
@@ -157,7 +171,7 @@ const views = {};
 let activeView = 'extraction';
 
 views.extraction = makeView('extraction', {
-  listUrl: '/api/documents',
+  fetchData: async () => (await fetch('/api/documents')).json(),
   keyOf: r => r.source_type + '\\u0000' + r.doc_id,
   matchText: r => [r.date, r.source_type, r.title, r.sender, r.mime_type, r.doc_id].join(' '),
   renderList: items =>
@@ -205,7 +219,7 @@ views.extraction = makeView('extraction', {
 });
 
 views.translated = makeView('translated', {
-  listUrl: '/api/translations',
+  fetchData: async () => (await fetch('/api/translations')).json(),
   keyOf: r => String(r.id),
   matchText: r => [r.translated_at, r.source_type, r.doc_id, r.translator].join(' '),
   renderList: items =>
@@ -232,6 +246,7 @@ views.translated = makeView('translated', {
         '<h2>Translation set</h2>' + metaTable(core)
       + '<div class="bar">source document: <a class="xref" id="todoc">'
         + esc(set.source_type) + ':' + esc(set.doc_id) + '</a></div>'
+      + '<h2>Embedding entries</h2><div id="tr-embs" class="muted">Loading…</div>'
       + '<h2>Parts</h2>' + (parts || '<p class="muted">(no parts)</p>');
     // doc_id cross-link -> Extraction view.
     const link = el.querySelector('#todoc');
@@ -239,15 +254,125 @@ views.translated = makeView('translated', {
       switchView('extraction');
       views.extraction.selectKey(set.source_type + '\\u0000' + set.doc_id);
     };
+    // Embedding entries for this set (points across models) -> Embedding view.
+    // Compact: one line per model; per sub_doc_id, the chunk numbers as links.
+    const embDiv = el.querySelector('#tr-embs');
+    const embs = await (await fetch('/api/translation_embeddings?set_id=' + encodeURIComponent(set.id))).json();
+    if (!embs.length) { embDiv.innerHTML = '<span class="muted">(none)</span>'; return; }
+    embDiv.classList.remove('muted');
+    const byModel = {};
+    for (const e of embs) {
+      const sub = (e.sub_doc_id || []).join('/') || '(root)';
+      (byModel[e.model] ??= {});
+      (byModel[e.model][sub] ??= []).push(e);
+    }
+    embDiv.innerHTML = Object.keys(byModel).sort().map(model => {
+      const groups = Object.keys(byModel[model]).sort().map(sub => {
+        const links = byModel[model][sub].sort((a, b) => a.chunk - b.chunk)
+          .map(e => `<a class="xref" data-eid="${esc(e.id)}">[${esc(e.chunk)}]</a>`).join(' ');
+        return `${esc(sub)} ${links}`;
+      }).join(', &nbsp; ');
+      return `<div><strong>${esc(model)}:</strong> ${groups}</div>`;
+    }).join('');
+    embDiv.querySelectorAll('a[data-eid]').forEach(a => {
+      a.onclick = () => embeddingShowId(a.dataset.eid);
+    });
   },
 });
 
+// --- embedding view (query-driven) ---------------------------------------
+const embQ = document.getElementById('emb-q');
+const embModelsEl = document.getElementById('emb-models');
+
+function selectedModels() {
+  return Array.from(embModelsEl.querySelectorAll('input:checked')).map(c => c.value);
+}
+async function populateEmbModels() {
+  const models = await (await fetch('/api/embed_models')).json();
+  if (!models.length) { embModelsEl.innerHTML = '<span class="muted">(no models configured)</span>'; return; }
+  embModelsEl.innerHTML = 'models: ' + models.map(m =>
+    `<label><input type="checkbox" value="${esc(m.id)}" checked> ${esc(m.id)}`
+    + ` <span class="muted">(${esc(m.type)})</span></label>`).join('');
+  embModelsEl.querySelectorAll('input').forEach(c => { c.onchange = () => views.embedding.load(); });
+}
+// Switch to the Embedding view and show one entry by id (deep link target).
+async function embeddingShowId(id) {
+  switchView('embedding');
+  embQ.value = '#id:' + id;
+  await views.embedding.load();
+  await views.embedding.selectKey(String(id));
+}
+
+views.embedding = makeView('embedding', {
+  fetchData: async () => {
+    const q = embQ.value.trim();
+    if (!q) return [];
+    if (q.startsWith('#id:')) {
+      // Exact-entry lookup — no query embedding.
+      const id = q.slice(4).trim();
+      const r = await (await fetch('/api/embed_entry?id=' + encodeURIComponent(id))).json();
+      return r.results;
+    }
+    const r = await (await fetch('/api/embed_query?q=' + encodeURIComponent(q)
+      + '&models=' + encodeURIComponent(selectedModels().join(',')))).json();
+    if (r.errors && r.errors.length) alert('embed errors:\n' + r.errors.join('\n'));
+    return r.results;
+  },
+  keyOf: r => String(r.id),
+  matchText: r => [r.model, r.doc_id, r.source_type].join(' '),
+  renderList: items =>
+    '<table><thead><tr><th>score</th><th>model</th><th>source</th><th>doc_id</th>'
+    + '<th>part</th><th>chunk</th></tr></thead><tbody>'
+    + items.map(r => `<tr><td>${r.score == null ? '' : esc(r.score.toFixed(4))}</td>`
+        + `<td>${esc(r.model)}</td><td>${esc(r.source_type)}</td><td>${esc(r.doc_id)}</td>`
+        + `<td>${esc(r.part_id)}</td><td>${esc(r.chunk)}</td></tr>`).join('')
+    + '</tbody></table>',
+  hashState: () => ({ q: embQ.value, models: selectedModels().join(',') }),
+  applyState: (p) => {
+    embQ.value = p.get('q') || '';
+    const models = (p.get('models') || '').split(',').filter(Boolean);
+    if (models.length) embModelsEl.querySelectorAll('input').forEach(c => { c.checked = models.includes(c.value); });
+  },
+  showDetail: (item, el) => {
+    const info = {
+      id: item.id, model: item.model,
+      score: item.score == null ? '(exact fetch)' : item.score,
+      source_type: item.source_type, doc_id: item.doc_id,
+      set_id: item.set_id, part_id: item.part_id,
+      sub_doc_id: (item.sub_doc_id || []).join('/') || '(root)',
+      chunk: item.chunk,
+    };
+    el.innerHTML =
+        '<h2>Embedding entry</h2>' + metaTable(info)
+      + '<div class="bar"><a class="xref" id="emb-todoc">document: '
+        + esc(item.source_type) + ':' + esc(item.doc_id) + '</a>'
+      + (item.set_id != null
+          ? ` &nbsp;·&nbsp; <a class="xref" id="emb-toset">translation set ${esc(item.set_id)}</a>` : '')
+      + '</div>';
+    const d = el.querySelector('#emb-todoc');
+    if (d) d.onclick = () => { switchView('extraction'); views.extraction.selectKey(item.source_type + '\\u0000' + item.doc_id); };
+    const s = el.querySelector('#emb-toset');
+    if (s) s.onclick = () => { switchView('translated'); views.translated.selectKey(String(item.set_id)); };
+  },
+});
+
+// Enter in the query box runs the embedding search.
+embQ.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  views.embedding.load();
+});
+
 // --- view switching ------------------------------------------------------
-function switchView(name) {
+let applyingHash = false;
+function setActiveView(name) {
   activeView = name;
   document.querySelectorAll('.view').forEach(el => { el.hidden = (el.dataset.view !== name); });
   document.querySelectorAll('nav a[data-view]').forEach(a =>
     a.classList.toggle('active', a.dataset.view === name));
+}
+function switchView(name) {
+  setActiveView(name);
   views[name].ensureLoaded();
   updateHash();
 }
@@ -255,10 +380,14 @@ document.querySelectorAll('nav a[data-view]').forEach(a => {
   a.onclick = () => switchView(a.dataset.view);
 });
 
-// --- deep linking (#view=..&key=..) --------------------------------------
+// --- deep linking (#view=..[&q=..&models=..]&key=..) ---------------------
 function updateHash() {
+  if (applyingHash) return;  // don't rewrite the hash while restoring from it
   const v = views[activeView];
   const params = new URLSearchParams({ view: activeView });
+  if (v.hashState) for (const [k, val] of Object.entries(v.hashState())) {
+    if (val != null && val !== '') params.set(k, val);
+  }
   if (v.key != null) params.set('key', v.key);
   const h = '#' + params.toString();
   if (location.hash !== h) history.replaceState(null, '', h);
@@ -266,11 +395,17 @@ function updateHash() {
 async function applyHash() {
   const p = new URLSearchParams(location.hash.slice(1));
   const view = p.get('view');
-  if (view && views[view]) {
-    switchView(view);
+  if (!view || !views[view]) return;
+  applyingHash = true;
+  try {
+    setActiveView(view);
+    const v = views[view];
+    if (v.applyState) v.applyState(p);   // restore inputs (e.g. embedding query)
+    await v.load();
     const key = p.get('key');
-    if (key) await views[view].selectKey(key);
-  }
+    if (key) await v.selectKey(key);
+  } finally { applyingHash = false; }
+  updateHash();
 }
 window.addEventListener('hashchange', applyHash);
 
@@ -347,6 +482,7 @@ checkBoot();
 
 // --- boot ----------------------------------------------------------------
 (async () => {
+  await populateEmbModels();
   await views.extraction.ensureLoaded();
   if (location.hash) await applyHash();
 })();
