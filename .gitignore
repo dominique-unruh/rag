@@ -5,8 +5,8 @@ __pycache__/
 .pytest_cache/
 .venv/
 
-# Project runtime data
-/storage/
+# Project runtime data (also matches a `storage` symlink to an external dir)
+/storage
 config.yaml
 
 # Editor / OS
