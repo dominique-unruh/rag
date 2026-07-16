@@ -14,6 +14,7 @@ testable without a live server.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from datetime import datetime
 from email.headerregistry import Address
@@ -38,8 +39,9 @@ _EMAIL_MIME: str = "message/rfc822"
 _MAIL_LINK_BASE: str = "https://qis.rwth-aachen.de/people/unruh/tools/mail-link/"
 
 # Mapping of mail-link fragment field name -> stable-metadata key that fills it.
+# The mail-link "subject" field is sourced from the global `title` key.
 _MAIL_LINK_FIELDS: tuple[tuple[str, str], ...] = (
-    ("subject", "subject"),
+    ("subject", "title"),
     ("date", "date"),
     ("from", "sender"),
     ("to", "recipients"),
@@ -92,6 +94,24 @@ def _received_datetime(msg: EmailMessage) -> "datetime | None":
     return None
 
 
+def _message_ids(header: object) -> list[str]:
+    """Extract bare message-ids from a References / In-Reply-To header value.
+
+    Returns the ids without angle brackets (matching the ``doc_id`` form), in
+    order. Falls back to whitespace-splitting if the header has no ``<...>``
+    tokens. Empty list when the header is absent/empty.
+    """
+    if header is None:
+        return []
+    text = str(header)
+    # Message-ids are normally wrapped in angle brackets; grab those first.
+    ids = re.findall(r"<([^>]+)>", text)
+    if not ids:
+        # Malformed header without brackets — best-effort whitespace split.
+        ids = text.split()
+    return [i.strip() for i in ids if i.strip()]
+
+
 def _header_datetime(msg: EmailMessage) -> "datetime | None":
     """Return the message's timezone-aware datetime, or ``None``.
 
@@ -112,17 +132,18 @@ def build_stable_metadata(msg: EmailMessage) -> dict[str, Any]:
 
     ``msg`` must be parsed with ``policy=email.policy.default`` so headers are
     decoded and addresses/dates come back structured. Keys: ``sender``,
-    ``recipients`` (To + Cc), ``subject``, ``mime-type`` and — only when the Date
-    header parses — ``date`` in the shared canonical format
-    (:func:`rag.timestamps.format_timestamp`). The owning account is deliberately
-    *not* here (it is transient).
+    ``recipients`` (To + Cc), the global ``title`` (= the decoded Subject),
+    ``mime-type`` and — only when the Date header parses — ``date`` in the shared
+    canonical format (:func:`rag.timestamps.format_timestamp`). The owning account
+    is deliberately *not* here (it is transient).
     """
     subject = msg["Subject"]
     meta: dict[str, Any] = {
         "sender": _address_field(msg, "From"),
         "recipients": _address_field(msg, "To", "Cc"),
-        # str() of a decoded header yields the Unicode subject ("" when absent).
-        "subject": str(subject) if subject is not None else "",
+        # The email's title is its Subject (global `title` key). str() of a decoded
+        # header yields the Unicode subject ("" when absent).
+        "title": str(subject) if subject is not None else "",
         "mime-type": _EMAIL_MIME,
     }
     # Store the date only if it parsed; normalise to the canonical format so it
@@ -130,6 +151,14 @@ def build_stable_metadata(msg: EmailMessage) -> dict[str, Any]:
     moment = _header_datetime(msg)
     if moment is not None:
         meta["date"] = format_timestamp(moment)
+    # Threading headers as lists of bare message-ids (present ones only). These
+    # match the doc_id form, so they reference other messages.
+    references = _message_ids(msg["References"])
+    if references:
+        meta["references"] = references
+    in_reply_to = _message_ids(msg["In-Reply-To"])
+    if in_reply_to:
+        meta["in-reply-to"] = in_reply_to
     return meta
 
 

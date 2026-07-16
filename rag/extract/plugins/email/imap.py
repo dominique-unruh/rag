@@ -515,8 +515,8 @@ def _sync_folder(
                 date_str = _imap_date(datetime.fromisoformat(date_iso)) if date_iso else "?"
             except ValueError:
                 date_str = "?"
-            # One line per item: what happened + date + folder + id + subject.
-            print(f"{result.status.value:9} {date_str:>11} [{folder}] {doc_id}  {stable.get('subject', '')}")
+            # One line per item: what happened + date + folder + id + title (subject).
+            print(f"{result.status.value:9} {date_str:>11} [{folder}] {doc_id}  {stable.get('title', '')}")
         if remaining is not None:
             remaining -= 1
 

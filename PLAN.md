@@ -39,7 +39,7 @@ ones.
 | Metadata DB        | **SQLite** in **WAL** mode      | Single file, no server, backup-friendly. WAL gives many concurrent readers + one writer across processes. |
 | Blob storage       | **Filesystem, content-addressed by hash** | Dedup, immutable, incremental-backup-friendly, lock-free reads. |
 | Vector store       | **Qdrant (embedded, local path)** | Same family as prototype, good metadata filtering. Single-process lock — see §9 for the concurrency policy. |
-| LLM / embeddings   | **OpenAI-compatible endpoint**  | Works with local (Ollama / LM Studio / vLLM / llama.cpp) or hosted. |
+| LLM / embeddings   | **OpenAI-compatible endpoint** *or* **native Ollama** | OpenAI-compatible covers hosted + local servers (LM Studio / vLLM / llama.cpp, and Ollama's `/v1`); native Ollama is also supported directly (its own API + embeddings, model pull/management). Selected per model (§6.1). |
 | Config             | **Central YAML** file           | Everything except secrets. |
 | Secrets            | **Desktop keyring** (+ file fallback)   | No secrets in the YAML or repo. |
 
@@ -603,9 +603,18 @@ one for hybrid retrieval, or an old and a new dense model during a migration).
 
 - A **model registry** (in config) lists the enabled embedding models. Each entry
   has: a stable **model id** (treated like a version — changing the model or its
-  parameters means a *new* id), a **type** (`dense` / `sparse`), a backend, the
+  parameters means a *new* id), a **type** (`dense` / `sparse`), a **backend**, the
   index/collection name, and for dense models the dimension + metric + any query
   instruction template.
+- The **backend** selects how the model is reached:
+  - `openai` — any OpenAI-compatible embeddings endpoint (`api_base` + optional
+    api key from secrets); covers hosted providers and local servers including
+    Ollama's `/v1`, LM Studio, vLLM, llama.cpp.
+  - `ollama` — a native Ollama server (its own embeddings API; can also pull /
+    manage models). Configured by its `host` (e.g. `http://localhost:11434`) and
+    Ollama model name.
+  Backends are per model, so e.g. a native-Ollama dense model and a hosted dense
+  model can coexist in the registry.
 - Each model owns its **own index** (its own Qdrant collection, or a sparse
   index). Different models never share a space — dims/metrics may differ freely.
   They are combined only at query time (fusion, §7), never compared directly.
@@ -658,7 +667,9 @@ Chat interface over the RAG, with selectable modes and LLM models.
 - **Complex mode**: the LLM can actively access the RAG, the raw documents, the
   translations, and perform web searches; it plans its own retrieval strategy.
 
-Model and mode are selectable on the command line.
+Model and mode are selectable on the command line. Chat LLMs use the same backend
+options as embedding models (§6.1): an **OpenAI-compatible** endpoint (hosted, or
+local via Ollama's `/v1` / LM Studio / vLLM / llama.cpp) or **native Ollama**.
 
 **Retrieval / fusion.** When several embedding models are populated (§6),
 retrieval queries each selected model's index and **fuses** the ranked lists

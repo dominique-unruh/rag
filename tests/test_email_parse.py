@@ -51,7 +51,9 @@ def test_build_stable_metadata() -> None:
     """
     meta = build_stable_metadata(_parse(_RAW))
     assert meta["sender"] == "Alice Example <alice@example.org>"
-    assert meta["subject"] == "Café meeting"
+    # The Subject is stored under the global `title` key.
+    assert meta["title"] == "Café meeting"
+    assert "subject" not in meta
     # account is transient, not stable.
     assert "account" not in meta
     # Recipients combine To and Cc.
@@ -65,6 +67,21 @@ def test_stable_metadata_date_normalised_to_utc() -> None:
     """A non-UTC Date header is converted to the canonical UTC (Z) format."""
     raw = "From: a@x\r\nDate: Wed, 15 Jul 2026 09:30:00 +0200\r\n\r\nbody"
     assert build_stable_metadata(_parse(raw))["date"] == "2026-07-15T07:30:00Z"
+
+
+def test_stable_metadata_threading_headers() -> None:
+    """References / In-Reply-To become lists of bare message-ids."""
+    raw = (
+        "From: a@x\r\n"
+        "In-Reply-To: <parent@x>\r\n"
+        "References: <root@x> <parent@x>\r\n\r\nbody"
+    )
+    meta = build_stable_metadata(_parse(raw))
+    assert meta["in-reply-to"] == ["parent@x"]
+    assert meta["references"] == ["root@x", "parent@x"]
+    # Absent threading headers -> keys omitted.
+    plain = build_stable_metadata(_parse("From: a@x\r\n\r\nbody"))
+    assert "references" not in plain and "in-reply-to" not in plain
 
 
 def test_stable_metadata_omits_missing_or_bad_date() -> None:
@@ -98,7 +115,7 @@ def test_source_url() -> None:
     from rag.extract.plugins.email import EmailExtractor
 
     url = EmailExtractor().source_url(
-        "abc@example.org", {"subject": "Hi there", "sender": "A <a@x>"}, {}
+        "abc@example.org", {"title": "Hi there", "sender": "A <a@x>"}, {}
     )
     # Base + fragment, message-id percent-encoded, fields appended.
     assert url.startswith("https://qis.rwth-aachen.de/people/unruh/tools/mail-link/#")
