@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import email.policy
 from email import message_from_string
 
-from rag.extract.plugins.email import (
-    build_stable_metadata,
-    build_transient_metadata,
-    _clean_address,
-    _clean_address_list,
-    _decode_mime_words,
-)
+from rag.extract.plugins.email import build_stable_metadata, build_transient_metadata
 from rag.extract.plugins.email.imap import _list_folders, _looks_like_email, _truthy
+
+
+def _parse(raw: str) -> "email.message.EmailMessage":
+    """Parse a raw email with the modern policy (as the plugin does)."""
+    return message_from_string(raw, policy=email.policy.default)
 
 
 def test_looks_like_email() -> None:
@@ -43,31 +43,13 @@ _RAW = (
 )
 
 
-def test_clean_address_with_name() -> None:
-    """A display name is rendered as ``NAME <EMAIL>``."""
-    assert _clean_address("Alice Example <alice@example.org>") == "Alice Example <alice@example.org>"
-
-
-def test_clean_address_without_name() -> None:
-    """A bare address is returned unchanged."""
-    assert _clean_address("bob@example.com") == "bob@example.com"
-
-
-def test_clean_address_list_multiple() -> None:
-    """Multiple recipients are cleaned and comma-joined."""
-    result = _clean_address_list("Bob <bob@example.com>, carol@example.net")
-    assert result == "Bob <bob@example.com>, carol@example.net"
-
-
-def test_decode_mime_words() -> None:
-    """RFC 2047 encoded words are decoded to Unicode."""
-    assert _decode_mime_words("=?utf-8?q?Caf=C3=A9?=") == "Café"
-
-
 def test_build_stable_metadata() -> None:
-    """Stable metadata pulls the expected fields from a parsed message."""
-    msg = message_from_string(_RAW)
-    meta = build_stable_metadata(msg)
+    """Stable metadata pulls the expected fields from a parsed message.
+
+    Exercises the stdlib policy.default parser: RFC 2047 subject decoding,
+    display-name addresses and To+Cc recipient merging.
+    """
+    meta = build_stable_metadata(_parse(_RAW))
     assert meta["sender"] == "Alice Example <alice@example.org>"
     assert meta["subject"] == "Café meeting"
     # account is transient, not stable.
@@ -75,7 +57,34 @@ def test_build_stable_metadata() -> None:
     # Recipients combine To and Cc.
     assert "bob@example.com" in meta["recipients"]
     assert "dave@example.org" in meta["recipients"]
-    assert meta["date"].startswith("2026-07-15T09:30:00")
+    # Date normalised to canonical UTC ISO 8601 with the Z designator.
+    assert meta["date"] == "2026-07-15T09:30:00Z"
+
+
+def test_stable_metadata_date_normalised_to_utc() -> None:
+    """A non-UTC Date header is converted to the canonical UTC (Z) format."""
+    raw = "From: a@x\r\nDate: Wed, 15 Jul 2026 09:30:00 +0200\r\n\r\nbody"
+    assert build_stable_metadata(_parse(raw))["date"] == "2026-07-15T07:30:00Z"
+
+
+def test_stable_metadata_omits_missing_or_bad_date() -> None:
+    """No Date header, or an unparseable one (and no Received), omits the date key."""
+    no_date = build_stable_metadata(_parse("From: a@x\r\nSubject: Hi\r\n\r\nbody"))
+    assert "date" not in no_date
+    bad_date = build_stable_metadata(_parse("From: a@x\r\nDate: not a date\r\n\r\nbody"))
+    assert "date" not in bad_date
+
+
+def test_stable_metadata_date_falls_back_to_received() -> None:
+    """An unparseable Date falls back to the first parseable Received timestamp."""
+    raw = (
+        "From: a@x\r\n"
+        "Received: from m2 by n2; Wed, 15 Jul 2026 11:00:00 +0000\r\n"
+        "Received: from m1 by n1; Wed, 15 Jul 2026 09:30:00 +0200\r\n"
+        "Date: garbage\r\n\r\nbody"
+    )
+    # First Received header wins (11:00 UTC).
+    assert build_stable_metadata(_parse(raw))["date"] == "2026-07-15T11:00:00Z"
 
 
 def test_list_folders_excludes() -> None:

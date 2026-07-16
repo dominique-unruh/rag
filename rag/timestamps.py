@@ -100,3 +100,14 @@ def to_utc(moment: datetime) -> datetime:
     # Naive inputs are interpreted as local time before converting.
     aware = moment if moment.tzinfo is not None else moment.astimezone()
     return aware.astimezone(timezone.utc)
+
+
+def format_timestamp(moment: datetime) -> str:
+    """Return the canonical string form of a timestamp, shared by all extractors.
+
+    The value is normalised to UTC and rendered as ISO 8601 with the ``Z`` UTC
+    designator (e.g. ``2026-07-15T07:30:00Z``), so every extractor stores dates in
+    one fixed, comparable format regardless of the source's original representation.
+    """
+    # isoformat() renders UTC as "+00:00"; use the equivalent compact "Z".
+    return to_utc(moment).isoformat().replace("+00:00", "Z")

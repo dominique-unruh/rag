@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from rag.errors import TimestampError
-from rag.timestamps import parse_timestamp, to_utc
+from rag.timestamps import format_timestamp, parse_timestamp, to_utc
 
 # Fixed reference instant so relative parsing is deterministic.
 _REF = datetime(2026, 7, 15, 12, 0, 0, tzinfo=timezone.utc)
@@ -57,6 +57,12 @@ def test_invalid_raises() -> None:
     """Unparseable input raises :class:`TimestampError`."""
     with pytest.raises(TimestampError):
         parse_timestamp("not a time")
+
+
+def test_format_timestamp_uses_utc_z() -> None:
+    """Canonical formatting normalises to UTC and uses the Z designator."""
+    aware = datetime(2026, 1, 1, 12, tzinfo=timezone(timedelta(hours=2)))
+    assert format_timestamp(aware) == "2026-01-01T10:00:00Z"
 
 
 def test_to_utc_converts() -> None:

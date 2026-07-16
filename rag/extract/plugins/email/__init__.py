@@ -15,15 +15,17 @@ testable without a live server.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from email.message import Message
-from email.utils import getaddresses, parsedate_to_datetime, parseaddr
-from email.header import decode_header
+from datetime import datetime
+from email.headerregistry import Address
+from email.message import EmailMessage
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, quote_plus
 
 from ....errors import ConfigError
 from ....secrets import Secrets
+from ....timestamps import format_timestamp
 from ...base import Extractor, Store
 from .imap import extract_account
 
@@ -43,83 +45,92 @@ _MAIL_LINK_FIELDS: tuple[tuple[str, str], ...] = (
     ("to", "recipients"),
 )
 
-# TODO: use existing email library, don't implement own parsers (e.g., _decode_mime_words).
+def _format_address(addr: Address) -> str:
+    """Render one parsed :class:`Address` as ``NAME <EMAIL>`` (or just ``EMAIL``)."""
+    # headerregistry already RFC 2047-decodes the display name for us.
+    name = addr.display_name
+    return f"{name} <{addr.addr_spec}>" if name else addr.addr_spec
 
-def _decode_mime_words(raw: str | None) -> str:
-    """Decode RFC 2047 encoded-word header text into a plain Unicode string.
 
-    Handles headers like ``=?utf-8?q?...?=``; unknown charsets fall back to
-    latin-1 so we never crash on odd senders. Returns ``""`` for ``None``.
+def _address_field(msg: EmailMessage, *fields: str) -> str:
+    """Return a cleaned, comma-joined address list from the given header ``fields``.
+
+    Relies on the stdlib ``policy.default`` header parser (``AddressHeader``),
+    which handles encoded words, groups and malformed input robustly.
     """
-    if raw is None:
-        return ""
-    parts: list[str] = []
-    # decode_header splits the header into (bytes-or-str, charset) chunks.
-    for chunk, charset in decode_header(raw):
-        if isinstance(chunk, bytes):
-            # Decode with the declared charset, tolerating errors/garbage.
-            parts.append(chunk.decode(charset or "utf-8", errors="replace"))
-        else:
-            parts.append(chunk)
-    # Join and collapse internal whitespace/newlines from folded headers.
-    return " ".join("".join(parts).split())
-
-
-def _clean_address(raw: str) -> str:
-    """Return a single address as ``NAME <EMAIL>`` (or just ``EMAIL`` if no name)."""
-    # parseaddr splits "Display <addr>" into (name, addr).
-    name, addr = parseaddr(raw)
-    name = _decode_mime_words(name)
-    if name:
-        return f"{name} <{addr}>"
-    return addr
-
-
-def _clean_address_list(raw: str) -> str:
-    """Return a comma-separated cleaned list of addresses from a header value."""
-    # getaddresses handles multiple comma-separated addresses robustly.
-    cleaned: list[str] = []
-    for name, addr in getaddresses([raw or ""]):
-        if not addr:
-            # Skip empty/garbage entries produced by malformed headers.
+    out: list[str] = []
+    for field in fields:
+        header = msg[field]
+        if header is None:
             continue
-        decoded_name = _decode_mime_words(name)
-        cleaned.append(f"{decoded_name} <{addr}>" if decoded_name else addr)
-    return ", ".join(cleaned)
+        # ``.addresses`` is provided by the AddressHeader value type.
+        for addr in header.addresses:
+            if addr.addr_spec:
+                out.append(_format_address(addr))
+    return ", ".join(out)
 
 
-def _header_date_iso(msg: Message) -> str:
-    """Return the message ``Date`` header as an ISO-8601 string, or ``""``."""
-    raw = msg.get("Date")
-    if not raw:
-        return ""
-    try:
-        # parsedate_to_datetime yields an aware datetime for well-formed headers.
-        return parsedate_to_datetime(raw).isoformat()
-    except (TypeError, ValueError):
-        # Malformed Date header: better to record nothing than a wrong value.
-        return ""
+def _received_datetime(msg: EmailMessage) -> "datetime | None":
+    """Approximate the message date from the ``Received`` trace headers.
+
+    Each ``Received`` header ends with ``; <date>``. Headers are tried in order
+    (the first/topmost — added last in transit, closest to delivery — wins), and
+    the first parseable date is returned. ``None`` if none parse.
+    """
+    for received in msg.get_all("Received", []):
+        text = str(received)
+        if ";" not in text:
+            continue
+        # The timestamp is the part after the final ';'.
+        candidate = text.rsplit(";", 1)[1].strip()
+        try:
+            moment = parsedate_to_datetime(candidate)
+        except (TypeError, ValueError):
+            continue
+        if moment is not None:
+            return moment
+    return None
 
 
-def build_stable_metadata(msg: Message) -> dict[str, Any]:
+def _header_datetime(msg: EmailMessage) -> "datetime | None":
+    """Return the message's timezone-aware datetime, or ``None``.
+
+    Prefers the ``Date`` header (``DateHeader.datetime``); when that is missing or
+    unparseable, falls back to an approximation from the ``Received`` trace
+    headers. ``None`` only if neither yields a usable date.
+    """
+    header = msg["Date"]
+    moment = getattr(header, "datetime", None) if header is not None else None
+    if moment is not None:
+        return moment
+    # Date header absent/invalid — approximate from the Received trace.
+    return _received_datetime(msg)
+
+
+def build_stable_metadata(msg: EmailMessage) -> dict[str, Any]:
     """Build the content-defining metadata for a parsed email ``msg``.
 
-    Keys: ``date``, ``sender``, ``recipients`` (To + Cc) and ``subject``. All are
-    stable — a change means the message content genuinely changed. The owning
-    account is deliberately *not* here (it is transient — a message may move
-    between accounts without its content changing).
+    ``msg`` must be parsed with ``policy=email.policy.default`` so headers are
+    decoded and addresses/dates come back structured. Keys: ``sender``,
+    ``recipients`` (To + Cc), ``subject``, ``mime-type`` and — only when the Date
+    header parses — ``date`` in the shared canonical format
+    (:func:`rag.timestamps.format_timestamp`). The owning account is deliberately
+    *not* here (it is transient).
     """
-    # Combine To and Cc into one recipients list for a simple, searchable field.
-    to = msg.get("To", "")
-    cc = msg.get("Cc", "")
-    combined = ", ".join(part for part in (to, cc) if part)
-    return {
-        "date": _header_date_iso(msg),
-        "sender": _clean_address(msg.get("From", "")),
-        "recipients": _clean_address_list(combined),
-        "subject": _decode_mime_words(msg.get("Subject")),
+    subject = msg["Subject"]
+    meta: dict[str, Any] = {
+        "sender": _address_field(msg, "From"),
+        "recipients": _address_field(msg, "To", "Cc"),
+        # str() of a decoded header yields the Unicode subject ("" when absent).
+        "subject": str(subject) if subject is not None else "",
         "mime-type": _EMAIL_MIME,
     }
+    # Store the date only if it parsed; normalise to the canonical format so it
+    # matches every other extractor. Omit it entirely otherwise.
+    moment = _header_datetime(msg)
+    if moment is not None:
+        meta["date"] = format_timestamp(moment)
+    return meta
 
 
 def build_transient_metadata(folder: str, account_id: str, *, read: bool) -> dict[str, Any]:
@@ -190,16 +201,23 @@ class EmailExtractor(Extractor):
         accounts = _accounts_from_config(config)
         # Optional restriction to a single configured account.
         only_account = options.get("account")
+        # The count budget is shared across ALL accounts (count=1 means one item
+        # total, not one per account). None = unlimited.
+        remaining: int | None = int(options["count"]) if options.get("count") is not None else None
         for account in accounts:
             account_id = str(account["account-id"])
             # Skip accounts the caller filtered out.
             if only_account is not None and account_id != only_account:
                 continue
-            # Delegate a single account's extraction (connect, sync, upsert/delete).
-            extract_account(
+            # Stop once the shared budget is exhausted.
+            if remaining is not None and remaining <= 0:
+                break
+            # Delegate one account's extraction; thread the leftover budget onward.
+            remaining = extract_account(
                 account=account,
                 store=store,
                 state_dir=state_dir,
                 secrets=secrets,
                 options=options,
+                remaining=remaining,
             )

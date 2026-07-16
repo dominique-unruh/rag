@@ -10,6 +10,7 @@ new and deleted messages.
 from __future__ import annotations
 
 import email
+import email.policy
 import imaplib
 import json
 import re
@@ -261,12 +262,13 @@ def _message_id(raw: bytes, uidvalidity: int, uid: int) -> tuple[str, Any]:
     the same message moved between accounts keeps one identity. If the message
     lacks a Message-ID header we synthesise an id from the UIDVALIDITY and UID.
     """
-    # Parse the full message once; the caller reuses it for metadata.
-    parsed = email.message_from_bytes(raw)
-    header = parsed.get("Message-ID")
-    if header:
-        # Strip the surrounding angle brackets and any stray whitespace.
-        msgid = header.strip().strip("<>").strip()
+    # Parse once with the modern policy so headers/addresses are decoded; the
+    # caller reuses the parsed message for metadata.
+    parsed = email.message_from_bytes(raw, policy=email.policy.default)
+    header = parsed["Message-ID"]
+    if header is not None:
+        # str() renders the (decoded) header; strip brackets/whitespace.
+        msgid = str(header).strip().strip("<>").strip()
     else:
         # No Message-ID: fall back to a UID-based identifier (stable per epoch).
         msgid = f"uidvalidity{uidvalidity}-uid{uid}"
@@ -331,13 +333,15 @@ def extract_account(
     state_dir: Path,
     secrets: Secrets,
     options: Mapping[str, Any],
-) -> None:
+    remaining: int | None,
+) -> int | None:
     """Connect to one IMAP account and reconcile its folders into ``store``.
 
     For each folder: detects deletions (known UIDs no longer on the server), then
-    fetches only new (previously-unseen) messages, bounded by the ``count``
-    option. Sync state is persisted so subsequent runs stay incremental and never
-    re-process an unchanged message.
+    fetches only new (previously-unseen) messages, bounded by the shared
+    ``remaining`` fetch budget (``None`` = unlimited). Returns the leftover budget
+    so it can be threaded across accounts. Sync state is persisted so subsequent
+    runs stay incremental and never re-process an unchanged message.
 
     Before syncing, documents that still carry a now-excluded folder in their
     transient metadata are purged (via a metadata query, not IMAP); if any were
@@ -346,7 +350,8 @@ def extract_account(
     re-added.
     """
     account_id = str(account["account-id"])
-    since, until, count = _parse_options(options)
+    # count is applied globally by the caller; only since/until come from here.
+    since, until, _ = _parse_options(options)
     folder_option = str(options["folder"]) if options.get("folder") else None
     # Verbose: print a one-liner per extracted/deleted message.
     verbose = bool(options.get("verbose"))
@@ -363,9 +368,6 @@ def extract_account(
         full_pass = _purge_excluded(store, account, folder_option, verbose)
         if _truthy(options.get("full")):
             full_pass = True
-        # A full pass invalidates the UID memory (re-fetch from scratch) but still
-        # honours the count budget — a large mailbox is resynced over several runs.
-        remaining = count
         for folder in _list_folders(client, account, folder_option):
             # Read-only select: we never modify the mailbox.
             typ, dat = client.select(_quote(folder), readonly=True)
@@ -404,6 +406,8 @@ def extract_account(
         except OSError:
             # Connection already dropped; nothing more to do.
             pass
+    # Hand the leftover budget back so the caller can thread it across accounts.
+    return remaining
 
 
 def _sync_folder(
@@ -505,14 +509,14 @@ def _sync_folder(
         result = store.upsert(doc_id, raw, stable, transient=transient)
         known[str(uid)] = doc_id
         if verbose:
-            # Format the message date as DD-Mon-YYYY (empty/unparseable -> "?").
-            date_iso = stable["date"]
+            # Format the message date as DD-Mon-YYYY (missing/unparseable -> "?").
+            date_iso = stable.get("date", "")
             try:
                 date_str = _imap_date(datetime.fromisoformat(date_iso)) if date_iso else "?"
             except ValueError:
                 date_str = "?"
             # One line per item: what happened + date + folder + id + subject.
-            print(f"{result.status.value:9} {date_str:>11} [{folder}] {doc_id}  {stable['subject']}")
+            print(f"{result.status.value:9} {date_str:>11} [{folder}] {doc_id}  {stable.get('subject', '')}")
         if remaining is not None:
             remaining -= 1
 
