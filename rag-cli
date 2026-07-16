@@ -25,7 +25,7 @@ fi
 # with --system-site-packages can satisfy imports from system packages while its
 # own site remains empty.
 _SENTINEL="$VENV/.rag-deps-installed"
-_DEPS=(pyyaml keyring secretstorage jeepney flask argcomplete)
+_DEPS=(pyyaml keyring secretstorage jeepney flask argcomplete markdownify pypdf)
 if [ ! -f "$_SENTINEL" ]; then
     echo "rag-cli: installing dependencies into $VENV ..." >&2
     if command -v uv >/dev/null 2>&1; then

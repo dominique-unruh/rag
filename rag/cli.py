@@ -59,6 +59,28 @@ def _build_parser() -> argparse.ArgumentParser:
         help="plugin-specific options (e.g. since='1w ago' count=100 folder=INBOX)",
     )
 
+    # --- translate subcommand --------------------------------------------
+    translate = subparsers.add_parser("translate", help="translate documents to Markdown")
+    translate.add_argument(
+        "--translator", default="dispatch",
+        help="translator to use (module name in translate.translators; default: %(default)s)",
+    )
+    translate.add_argument("--source", dest="source_type", help="restrict to one source_type")
+    translate.add_argument("--doc", dest="doc_id", help="restrict to one doc_id")
+    translate.add_argument("--limit", type=int, help="max number of documents to process")
+    translate.add_argument(
+        "--force", action="store_true",
+        help="retranslate even documents whose active translation is up to date",
+    )
+    translate.add_argument(
+        "--dry-run", action="store_true",
+        help="translate but do not write to the DB (dirty repo allowed)",
+    )
+    translate.add_argument(
+        "--inspect", action="store_true",
+        help="print translations for review instead of storing them (dirty repo allowed)",
+    )
+
     # --- maintenance subcommand (with its own sub-tools) -----------------
     maintenance = subparsers.add_parser("maintenance", help="run a maintenance tool")
     tools = maintenance.add_subparsers(dest="tool", required=True)
@@ -85,6 +107,27 @@ def _cmd_extract(args: argparse.Namespace) -> None:
     # Pass the verbose flag through to the plugin as a reserved option.
     options["verbose"] = args.verbose
     run_extraction(args.source_type, options, config)
+
+
+def _cmd_translate(args: argparse.Namespace) -> None:
+    """Handle ``rag translate`` — run the translation pipeline."""
+    from .translate.pipeline import TranslateOptions, run_translation
+
+    config = Config.load(args.config)
+    options = TranslateOptions(
+        translator=args.translator,
+        source_type=args.source_type,
+        doc_id=args.doc_id,
+        limit=args.limit,
+        force=args.force,
+        dry_run=args.dry_run,
+        inspect=args.inspect,
+    )
+    count = run_translation(config, options)
+    # Report the outcome (inspection mode already printed the translations).
+    if not args.inspect:
+        verb = "would translate" if args.dry_run else "translated"
+        print(f"{verb} {count} document(s)")
 
 
 def _cmd_maintenance(args: argparse.Namespace) -> None:
@@ -140,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
         # Dispatch to the selected subcommand handler.
         if args.command == "extract":
             _cmd_extract(args)
+        elif args.command == "translate":
+            _cmd_translate(args)
         elif args.command == "maintenance":
             _cmd_maintenance(args)
         else:  # pragma: no cover - argparse enforces valid commands

@@ -30,6 +30,17 @@ rag extract email since='1w ago' count=100 folder=INBOX
 Extraction writes document metadata to a SQLite database and raw source bytes to
 a content-addressed blob store, both under the configured `storage.dir`.
 
+## Translate
+
+Convert extracted documents to Markdown (module 2). Storing to the DB requires a
+clean git tree; `--inspect` / `--dry-run` do not.
+
+```sh
+rag translate --inspect                 # preview, no DB write
+rag translate --limit 100               # translate up to 100 documents
+rag translate --translator text --force # force with a specific translator
+```
+
 ## Browse the database
 
 ```sh

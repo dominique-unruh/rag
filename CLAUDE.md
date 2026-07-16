@@ -7,9 +7,10 @@ Guidance for working in this repository.
 A local, single-user **RAG pipeline** over personal data (email, notes, …). The
 full design is in [`PLAN.md`](PLAN.md) — read it before changing architecture.
 
-Pipeline stages: **extract → translate → embed → chat**. **Only extraction
-(module 1) is implemented so far.** The previous prototype lives untouched under
-[`old/`](old/) for reference; do not build on it — this is a from-scratch rewrite.
+Pipeline stages: **extract → translate → embed → chat**. **Extraction (module 1)
+and translation (module 2) are implemented; embed/chat are not yet.** The previous
+prototype lives untouched under [`old/`](old/) for reference; do not build on it —
+this is a from-scratch rewrite.
 
 ## Architecture (implemented parts)
 
@@ -25,7 +26,16 @@ Pipeline stages: **extract → translate → embed → chat**. **Only extraction
   - `runner.py` — wires config/secrets/db/blobs/state-dir and invokes a plugin.
   - `plugins/email/` — the only source plugin for now (IMAP). Working email-only
     until the system is proven; other sources come later.
-- `rag/cli.py` — `rag` entry point (`rag extract <source_type> [key=value …]`).
+- `rag/gitinfo.py` — git revision + clean-tree check (translation git gating).
+- `rag/translate/` — module 2:
+  - `base.py` — `Document`, `Translation`, the stateless `Translator` ABC, `make_translation`.
+  - `pipeline.py` — selection, invariant enforcement (doc_id, unique sub_doc_id), git gating, DB bookkeeping.
+  - `store.py` — `TranslationStore`: select docs needing translation, write sets/parts.
+  - `discovery.py` — loads a translator by module name (`--translator`, default `dispatch`).
+  - `markdown.py` — HTML→Markdown (markdownify).
+  - `translators/` — one file per translator (`dispatch`, `email`, `text`, `pdf`); each exposes `translator = <Class>()`.
+- `rag/maintenance/` — `db-browser` (Flask web UI), `delete` (cascading store API).
+- `rag/cli.py` — `rag` entry point (`extract`, `translate`, `maintenance` subcommands).
 
 ### Storage model (see PLAN §3)
 

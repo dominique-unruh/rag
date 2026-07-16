@@ -9,6 +9,8 @@ dependencies = [
     "keyring",
     "flask",
     "argcomplete",
+    "markdownify",
+    "pypdf",
 ]
 
 [project.optional-dependencies]
