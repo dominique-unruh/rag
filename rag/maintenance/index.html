@@ -293,7 +293,7 @@ async function populateEmbModels() {
   embModelsEl.innerHTML = 'models: ' + models.map(m =>
     `<label><input type="checkbox" value="${esc(m.id)}" checked> ${esc(m.id)}`
     + ` <span class="muted">(${esc(m.type)})</span></label>`).join('');
-  embModelsEl.querySelectorAll('input').forEach(c => { c.onchange = () => views.embedding.load(); });
+  // No auto-search on toggle — searching is expensive; only Enter runs it.
 }
 // Switch to the Embedding view and show one entry by id (deep link target).
 async function embeddingShowId(id) {

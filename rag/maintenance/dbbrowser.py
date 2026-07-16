@@ -431,7 +431,7 @@ def _create_app(database: IdleDatabase, blobs: BlobStore, config: Config) -> Fla
         srow = sets[0]
         part_rows = database.query(
             "SELECT part_key, json(sub_doc_id) AS sub, json(metadata) AS meta, blob_hash "
-            "FROM translation_parts WHERE set_id = ? ORDER BY part_key",
+            "FROM translation_parts WHERE set_id = ? ORDER BY id",
             (set_id,),
         )
         parts = []
