@@ -139,7 +139,7 @@ function makeView(name, opts) {
 
   v.ensureLoaded = async function () { if (!v.loaded) await v.load(); };
 
-  v.select = function (i) {
+  v.select = function (i, replace = false) {
     if (!v.rows.length) return;
     i = Math.max(0, Math.min(v.rows.length - 1, i));
     if (v.sel >= 0 && v.rows[v.sel]) v.rows[v.sel].classList.remove('sel');
@@ -149,7 +149,8 @@ function makeView(name, opts) {
     tr.scrollIntoView({ block: 'nearest' });
     v.key = opts.keyOf(v.data[i]);
     opts.showDetail(v.data[i], detailEl);
-    updateHash();
+    // Keyboard row-stepping replaces the history entry; clicks/etc push a new one.
+    updateHash(replace);
   };
 
   v.selectKey = async function (key) {
@@ -210,7 +211,7 @@ views.extraction = makeView('extraction', {
       + '<pre id="preview" class="muted">Loading preview…</pre>';
     // Wire translation cross-links -> Translated view.
     el.querySelectorAll('a.xref[data-set]').forEach(a => {
-      a.onclick = () => { switchView('translated'); views.translated.selectKey(a.dataset.set); };
+      a.onclick = () => goto('translated', a.dataset.set);
     });
     const txt = await (await fetch('/api/content?' + q + '&preview=1')).text();
     const pre = el.querySelector('#preview');
@@ -250,10 +251,7 @@ views.translated = makeView('translated', {
       + '<h2>Parts</h2>' + (parts || '<p class="muted">(no parts)</p>');
     // doc_id cross-link -> Extraction view.
     const link = el.querySelector('#todoc');
-    if (link) link.onclick = () => {
-      switchView('extraction');
-      views.extraction.selectKey(set.source_type + '\\u0000' + set.doc_id);
-    };
+    if (link) link.onclick = () => goto('extraction', set.source_type + '\\u0000' + set.doc_id);
     // Embedding entries for this set (points across models) -> Embedding view.
     // Compact: one line per model; per sub_doc_id, the chunk numbers as links.
     const embDiv = el.querySelector('#tr-embs');
@@ -296,8 +294,9 @@ async function populateEmbModels() {
   // No auto-search on toggle — searching is expensive; only Enter runs it.
 }
 // Switch to the Embedding view and show one entry by id (deep link target).
+// setActiveView (not switchView) avoids a spurious history push before selectKey.
 async function embeddingShowId(id) {
-  switchView('embedding');
+  setActiveView('embedding');
   embQ.value = '#id:' + id;
   await views.embedding.load();
   await views.embedding.selectKey(String(id));
@@ -350,9 +349,9 @@ views.embedding = makeView('embedding', {
           ? ` &nbsp;·&nbsp; <a class="xref" id="emb-toset">translation set ${esc(item.set_id)}</a>` : '')
       + '</div>';
     const d = el.querySelector('#emb-todoc');
-    if (d) d.onclick = () => { switchView('extraction'); views.extraction.selectKey(item.source_type + '\\u0000' + item.doc_id); };
+    if (d) d.onclick = () => goto('extraction', item.source_type + '\\u0000' + item.doc_id);
     const s = el.querySelector('#emb-toset');
-    if (s) s.onclick = () => { switchView('translated'); views.translated.selectKey(String(item.set_id)); };
+    if (s) s.onclick = () => goto('translated', String(item.set_id));
   },
 });
 
@@ -380,8 +379,17 @@ document.querySelectorAll('nav a[data-view]').forEach(a => {
   a.onclick = () => switchView(a.dataset.view);
 });
 
+// Navigate to a view and select an entry as ONE history entry: switch without
+// pushing, then let selectKey push the final state (view + key).
+async function goto(view, key) {
+  setActiveView(view);
+  await views[view].ensureLoaded();
+  if (key != null) await views[view].selectKey(key);
+  else updateHash();
+}
+
 // --- deep linking (#view=..[&q=..&models=..]&key=..) ---------------------
-function updateHash() {
+function updateHash(replace = false) {
   if (applyingHash) return;  // don't rewrite the hash while restoring from it
   const v = views[activeView];
   const params = new URLSearchParams({ view: activeView });
@@ -390,7 +398,12 @@ function updateHash() {
   }
   if (v.key != null) params.set('key', v.key);
   const h = '#' + params.toString();
-  if (location.hash !== h) history.replaceState(null, '', h);
+  if (location.hash === h) return;
+  // Clicks / view-switches / queries push a new history entry (so back/forward
+  // work); keyboard row-stepping replaces the current one to avoid flooding it.
+  // pushState is silent (no hashchange) so this never re-enters applyHash.
+  if (replace) history.replaceState(null, '', h);
+  else history.pushState(null, '', h);
 }
 async function applyHash() {
   const p = new URLSearchParams(location.hash.slice(1));
@@ -420,7 +433,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'PageDown') delta = v.pageStep();
   else if (e.key === 'PageUp') delta = -v.pageStep();
   const base = v.sel < 0 ? (delta > 0 ? -1 : 0) : v.sel;
-  v.select(base + delta);
+  v.select(base + delta, true);  // replace history entry (don't flood it)
 });
 
 // --- search: jump to matching rows in the active view --------------------
