@@ -26,3 +26,26 @@ extractors:
         # Password resolution order (never put it here):
         #   1. desktop keyring (service "rag", key = "imap:<host>:<username>")
         #   2. interactive prompt (cached to the keyring for next time)
+
+# Embedding (module 3). Each model has its own vector index; run one pass per
+# model: `rag embed --model <id>`.
+embedding:
+  chunk_size: 1024        # characters per chunk
+  chunk_overlap: 128      # overlap between consecutive chunks
+  models:
+    # Native Ollama backend.
+    - id: qwen3-8b
+      type: dense
+      backend: ollama
+      host: http://localhost:11434
+      model: qwen3-embedding:8b
+      dim: 4096
+      # query_instruction: "Instruct: retrieve relevant documents\nQuery: "
+    # OpenAI-compatible backend (also covers Ollama's /v1, LM Studio, vLLM, …).
+    # - id: nomic
+    #   type: dense
+    #   backend: openai
+    #   api_base: http://localhost:11434/v1
+    #   model: nomic-embed-text
+    #   dim: 768
+    #   # api_key_name: my-embed-key   # optional; resolved via the keyring

@@ -1,0 +1,139 @@
+"""Embedding model registry (PLAN §6.1).
+
+Parses the enabled embedding models from the ``embedding.models`` config section
+into :class:`ModelSpec`s. Each model has a stable id (treated like a version),
+a type, a backend (``openai`` / ``ollama``), and the parameters that backend and
+its index need.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+
+from ..errors import ConfigError
+
+# Default chunking parameters if the config omits them.
+_DEFAULT_CHUNK_SIZE: int = 1024
+_DEFAULT_CHUNK_OVERLAP: int = 128
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """One configured embedding model."""
+
+    id: str
+    """Stable model id (also the ``--model`` value and the `embeddings.model` value)."""
+
+    type: str
+    """``dense`` or ``sparse`` (only ``dense`` is implemented so far)."""
+
+    backend: str
+    """``openai`` (OpenAI-compatible endpoint) or ``ollama`` (native Ollama)."""
+
+    model: str
+    """The backend's model name (e.g. ``qwen3-embedding:8b``)."""
+
+    dim: int
+    """Vector dimension (must match the model's output; fixes the collection)."""
+
+    collection: str
+    """Vector-store collection name for this model's index."""
+
+    distance: str = "cosine"
+    """Similarity metric (``cosine`` / ``dot`` / ``euclid``)."""
+
+    api_base: str | None = None
+    """OpenAI-compatible base URL (e.g. ``http://localhost:11434/v1``)."""
+
+    host: str | None = None
+    """Native Ollama host (e.g. ``http://localhost:11434``)."""
+
+    api_key_name: str | None = None
+    """Secret name for the API key (resolved via the secrets mechanism), if any."""
+
+    query_instruction: str | None = None
+    """Optional instruction prefix prepended to *query* texts (not documents)."""
+
+
+def _collection_name(model_id: str) -> str:
+    """Return a safe default vector-store collection name for ``model_id``."""
+    # Keep it filesystem/collection-safe; models ids are usually already clean.
+    return "emb_" + re.sub(r"[^A-Za-z0-9_]+", "_", model_id)
+
+
+def _embedding_section(config_raw: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return the ``embedding`` config section (empty mapping if absent)."""
+    section = config_raw.get("embedding", {})
+    if not isinstance(section, Mapping):
+        raise ConfigError("top-level 'embedding' must be a mapping")
+    return section
+
+
+def chunk_params(config_raw: Mapping[str, Any]) -> tuple[int, int]:
+    """Return ``(chunk_size, chunk_overlap)`` from config, with defaults."""
+    section = _embedding_section(config_raw)
+    size = int(section.get("chunk_size", _DEFAULT_CHUNK_SIZE))
+    overlap = int(section.get("chunk_overlap", _DEFAULT_CHUNK_OVERLAP))
+    if size <= 0 or overlap < 0 or overlap >= size:
+        raise ConfigError(f"invalid chunking: size={size}, overlap={overlap}")
+    return size, overlap
+
+
+def _parse_model(entry: Mapping[str, Any]) -> ModelSpec:
+    """Build a :class:`ModelSpec` from one config entry, validating required keys."""
+    model_id = entry.get("id")
+    if not model_id:
+        raise ConfigError("each embedding model needs an 'id'")
+    backend = str(entry.get("backend", "openai"))
+    if backend not in ("openai", "ollama"):
+        raise ConfigError(f"model {model_id!r}: backend must be 'openai' or 'ollama'")
+    model_type = str(entry.get("type", "dense"))
+    if model_type != "dense":
+        # Sparse/other types are designed for (PLAN §6) but not yet implemented.
+        raise ConfigError(f"model {model_id!r}: only type 'dense' is implemented")
+    if "dim" not in entry:
+        raise ConfigError(f"model {model_id!r}: 'dim' is required for a dense model")
+    return ModelSpec(
+        id=str(model_id),
+        type=model_type,
+        backend=backend,
+        model=str(entry.get("model", model_id)),
+        dim=int(entry["dim"]),
+        collection=str(entry.get("collection") or _collection_name(str(model_id))),
+        distance=str(entry.get("distance", "cosine")),
+        api_base=entry.get("api_base"),
+        host=entry.get("host"),
+        api_key_name=entry.get("api_key_name"),
+        query_instruction=entry.get("query_instruction"),
+    )
+
+
+def load_models(config_raw: Mapping[str, Any]) -> dict[str, ModelSpec]:
+    """Return all configured embedding models keyed by id.
+
+    Reads ``embedding.models`` (a list of mappings). Returns an empty dict if the
+    section is absent.
+    """
+    section = _embedding_section(config_raw)
+    entries = section.get("models", [])
+    if not isinstance(entries, list):
+        raise ConfigError("embedding.models must be a list")
+    models: dict[str, ModelSpec] = {}
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise ConfigError("each embedding model must be a mapping")
+        spec = _parse_model(entry)
+        models[spec.id] = spec
+    return models
+
+
+def get_model(config_raw: Mapping[str, Any], model_id: str) -> ModelSpec:
+    """Return the :class:`ModelSpec` for ``model_id``, or raise :class:`ConfigError`."""
+    models = load_models(config_raw)
+    if model_id not in models:
+        available = ", ".join(sorted(models)) or "(none configured)"
+        raise ConfigError(f"unknown embedding model {model_id!r}; available: {available}")
+    return models[model_id]

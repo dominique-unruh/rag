@@ -41,6 +41,16 @@ rag translate --limit 100               # translate up to 100 documents
 rag translate --translator text --force # force with a specific translator
 ```
 
+## Embed
+
+Embed active translations into a model's vector index (module 3). Configure
+models under `embedding.models`, then run one pass per model:
+
+```sh
+rag embed --model qwen3-8b            # embed what needs it
+rag embed --model qwen3-8b --force    # re-embed everything selected
+```
+
 ## Browse the database
 
 ```sh

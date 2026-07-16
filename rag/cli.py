@@ -81,6 +81,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="print translations for review instead of storing them (dirty repo allowed)",
     )
 
+    # --- embed subcommand ------------------------------------------------
+    embed = subparsers.add_parser("embed", help="embed translations into a model's index")
+    embed.add_argument("--model", required=True, help="embedding model id (from config)")
+    embed.add_argument("--source", dest="source_type", help="restrict to one source_type")
+    embed.add_argument("--doc", dest="doc_id", help="restrict to one doc_id")
+    embed.add_argument("--limit", type=int, help="max number of documents to process")
+    embed.add_argument(
+        "--force", action="store_true",
+        help="re-embed even documents already up to date for this model",
+    )
+
     # --- maintenance subcommand (with its own sub-tools) -----------------
     maintenance = subparsers.add_parser("maintenance", help="run a maintenance tool")
     tools = maintenance.add_subparsers(dest="tool", required=True)
@@ -129,6 +140,23 @@ def _cmd_translate(args: argparse.Namespace) -> None:
     if not args.inspect:
         verb = "would translate" if args.dry_run else "translated"
         print(f"{verb} {count} document(s)")
+
+
+def _cmd_embed(args: argparse.Namespace) -> None:
+    """Handle ``rag embed`` — run the embedding pipeline for one model."""
+    from .embed.pipeline import EmbedOptions, run_embed
+
+    config = Config.load(args.config)
+    options = EmbedOptions(
+        model=args.model,
+        source_type=args.source_type,
+        doc_id=args.doc_id,
+        limit=args.limit,
+        force=args.force,
+        verbose=args.verbose,
+    )
+    count = run_embed(config, options)
+    print(f"embedded {count} document(s) into {args.model}")
 
 
 def _cmd_maintenance(args: argparse.Namespace) -> None:
@@ -186,6 +214,8 @@ def main(argv: list[str] | None = None) -> int:
             _cmd_extract(args)
         elif args.command == "translate":
             _cmd_translate(args)
+        elif args.command == "embed":
+            _cmd_embed(args)
         elif args.command == "maintenance":
             _cmd_maintenance(args)
         else:  # pragma: no cover - argparse enforces valid commands

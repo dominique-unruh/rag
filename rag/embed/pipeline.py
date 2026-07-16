@@ -1,0 +1,152 @@
+"""Embedding pipeline (PLAN §6.3).
+
+Runs one model's embed pass: for each document whose active translation set needs
+embedding, chunk its parts, embed the chunks, replace the document's points in
+that model's collection, and record the bookkeeping.
+"""
+
+from __future__ import annotations
+
+import sys
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+
+from qdrant_client import models
+
+from ..blobs import BlobStore
+from ..config import Config
+from ..db import Database
+from ..secrets import Secrets
+from .backends import embed_texts
+from .chunk import chunk_text
+from .models import ModelSpec, chunk_params, get_model
+from .store import DocRecord, EmbedStore
+from .vectorstore import VectorStore
+
+# Filenames/subdirs under the storage directory.
+_DB_FILENAME: str = "metadata.db"
+_BLOBS_SUBDIR: str = "blobs"
+_QDRANT_SUBDIR: str = "qdrant"
+
+# Namespace for deterministic point ids (so re-embedding is idempotent).
+_POINT_NS: uuid.UUID = uuid.UUID("6f4e2b90-1c2d-4e6a-9b7f-0a1b2c3d4e5f")
+
+# A function that maps a list of texts to a list of vectors (injectable in tests).
+EmbedFn = Callable[[list[str]], list[list[float]]]
+
+
+@dataclass(frozen=True)
+class EmbedOptions:
+    """Options controlling an embed run."""
+
+    model: str
+    """The embedding model id to run (its own index)."""
+
+    source_type: str | None = None
+    """Restrict to one source_type."""
+
+    doc_id: str | None = None
+    """Restrict to one document id."""
+
+    limit: int | None = None
+    """Max number of documents to process."""
+
+    force: bool = False
+    """Re-embed even documents already up to date for this model."""
+
+    verbose: bool = False
+    """Print one progress line per embedded document."""
+
+
+def _point_id(model_id: str, part_id: int, chunk_index: int) -> str:
+    """Return a deterministic point id for a (model, part, chunk).
+
+    Deterministic so re-embedding the same content overwrites the same points.
+    """
+    return str(uuid.uuid5(_POINT_NS, f"{model_id}:{part_id}:{chunk_index}"))
+
+
+def _embed_document(
+    doc: DocRecord, spec: ModelSpec, blobs: BlobStore, embed: EmbedFn, chunk_size: int, overlap: int
+) -> list[models.PointStruct]:
+    """Chunk and embed all parts of ``doc``; return the Qdrant points to store."""
+    points: list[models.PointStruct] = []
+    for part in doc.parts:
+        text = blobs.get(part.blob_hash).decode("utf-8", errors="replace")
+        chunks = chunk_text(text, chunk_size, overlap)
+        if not chunks:
+            # Empty part (e.g. an image-only PDF) — no points, but the part is
+            # still recorded as embedded so it is not reselected forever.
+            continue
+        vectors = embed(chunks)
+        for index, (chunk, vector) in enumerate(zip(chunks, vectors)):
+            points.append(
+                models.PointStruct(
+                    id=_point_id(spec.id, part.part_id, index),
+                    vector=vector,
+                    payload={
+                        "source_type": doc.source_type,
+                        "doc_id": doc.doc_id,
+                        "set_id": doc.set_id,
+                        "part_id": part.part_id,
+                        "chunk": index,
+                    },
+                )
+            )
+    return points
+
+
+def run_embed(
+    config: Config,
+    options: EmbedOptions,
+    *,
+    db: Database | None = None,
+    embed_fn: EmbedFn | None = None,
+    secrets: Secrets | None = None,
+) -> int:
+    """Run the embed pass for one model; return the number of documents embedded.
+
+    Opens the model's collection in the embedded vector store, iterates the
+    documents whose active set needs embedding (per ``options``), embeds their
+    parts and replaces their points, recording the bookkeeping. ``embed_fn`` may
+    override the backend (used by tests).
+    """
+    storage = config.storage_dir
+    spec = get_model(config.raw, options.model)
+    chunk_size, overlap = chunk_params(config.raw)
+    resolver = secrets if secrets is not None else Secrets(allow_prompt=False)
+    # Default embedder calls the configured backend for this model.
+    embed: EmbedFn = embed_fn or (lambda texts: embed_texts(spec, texts, secrets=resolver))
+
+    blobs = BlobStore(storage / _BLOBS_SUBDIR)
+    vectors = VectorStore(storage / _QDRANT_SUBDIR)
+    owns_db = db is None
+    database = db if db is not None else Database.open(storage / _DB_FILENAME)
+    try:
+        vectors.ensure_collection(spec.collection, spec.dim, spec.distance)
+        store = EmbedStore(database.conn, spec.id)
+        processed = 0
+        for doc in store.select_docs(
+            source_type=options.source_type,
+            doc_id=options.doc_id,
+            limit=options.limit,
+            force=options.force,
+        ):
+            points = _embed_document(doc, spec, blobs, embed, chunk_size, overlap)
+            # Replace this document's points in the model's collection, then record.
+            vectors.replace_document(spec.collection, doc.source_type, doc.doc_id, points)
+            store.record(doc)
+            processed += 1
+            if options.verbose:
+                sub = ", ".join("/".join(p.sub_doc_id) or "(root)" for p in doc.parts)
+                print(
+                    f"embedded {doc.source_type}:{doc.doc_id} (set {doc.set_id}) "
+                    f"-> {len(points)} chunk(s) [{sub}] into {spec.id}",
+                    file=sys.stderr,
+                )
+        return processed
+    finally:
+        vectors.close()
+        if owns_db:
+            database.close()

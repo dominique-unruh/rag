@@ -7,10 +7,10 @@ Guidance for working in this repository.
 A local, single-user **RAG pipeline** over personal data (email, notes, …). The
 full design is in [`PLAN.md`](PLAN.md) — read it before changing architecture.
 
-Pipeline stages: **extract → translate → embed → chat**. **Extraction (module 1)
-and translation (module 2) are implemented; embed/chat are not yet.** The previous
-prototype lives untouched under [`old/`](old/) for reference; do not build on it —
-this is a from-scratch rewrite.
+Pipeline stages: **extract → translate → embed → chat**. **Extraction (module 1),
+translation (module 2) and embedding (module 3) are implemented; chat is not yet.**
+The previous prototype lives untouched under [`old/`](old/) for reference; do not
+build on it — this is a from-scratch rewrite.
 
 ## Architecture (implemented parts)
 
@@ -34,8 +34,14 @@ this is a from-scratch rewrite.
   - `discovery.py` — loads a translator by module name (`--translator`, default `dispatch`).
   - `markdown.py` — HTML→Markdown (markdownify).
   - `translators/` — one file per translator (`dispatch`, `email`, `text`, `pdf`); each exposes `translator = <Class>()`.
+- `rag/embed/` — module 3:
+  - `models.py` — embedding model registry (`ModelSpec`; backends `openai` / `ollama`).
+  - `backends.py` — embed via OpenAI-compatible or native Ollama (stdlib HTTP).
+  - `chunk.py` — character chunking; `vectorstore.py` — embedded Qdrant, one collection per model.
+  - `store.py` — `EmbedStore`: select active sets needing embed (per model), record `embeddings` rows.
+  - `pipeline.py` — `run_embed`: chunk + embed + replace points + bookkeeping.
 - `rag/maintenance/` — `db-browser` (Flask web UI), `delete` (cascading store API).
-- `rag/cli.py` — `rag` entry point (`extract`, `translate`, `maintenance` subcommands).
+- `rag/cli.py` — `rag` entry point (`extract`, `translate`, `embed`, `maintenance` subcommands).
 
 ### Storage model (see PLAN §3)
 

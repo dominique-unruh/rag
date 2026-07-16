@@ -1,0 +1,93 @@
+"""Vector store wrapper over embedded Qdrant (PLAN §6).
+
+One Qdrant store (a local directory) holds a separate **collection per embedding
+model**. Embedded Qdrant takes an exclusive lock on its directory, matching the
+"embed holds the vector store for its run" concurrency policy (PLAN §9).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from qdrant_client import QdrantClient, models
+
+# Map our config distance names to Qdrant's enum.
+_DISTANCES: dict[str, models.Distance] = {
+    "cosine": models.Distance.COSINE,
+    "dot": models.Distance.DOT,
+    "euclid": models.Distance.EUCLID,
+}
+
+
+class VectorStore:
+    """Thin wrapper around an embedded Qdrant client, one collection per model."""
+
+    def __init__(self, path: Path) -> None:
+        """Open (or create) the embedded Qdrant store rooted at ``path``."""
+        # Directory is created by Qdrant; ensure the parent exists first.
+        path.mkdir(parents=True, exist_ok=True)
+        self._client: QdrantClient = QdrantClient(path=str(path))
+
+    def ensure_collection(self, collection: str, dim: int, distance: str) -> None:
+        """Create ``collection`` with the given dimension/metric if it is absent.
+
+        If it already exists with a different vector size, raise — mixing dims in
+        one collection would corrupt retrieval (PLAN §6).
+        """
+        if self._client.collection_exists(collection):
+            info = self._client.get_collection(collection)
+            existing = info.config.params.vectors.size  # type: ignore[union-attr]
+            if existing != dim:
+                raise ValueError(
+                    f"collection {collection!r} has dim {existing}, expected {dim}; "
+                    "use a fresh collection for a different model/dim"
+                )
+            return
+        metric = _DISTANCES.get(distance.lower(), models.Distance.COSINE)
+        self._client.create_collection(
+            collection,
+            vectors_config=models.VectorParams(size=dim, distance=metric),
+        )
+
+    def replace_document(
+        self, collection: str, source_type: str, doc_id: str, points: list[models.PointStruct]
+    ) -> None:
+        """Delete a document's existing points, then upsert its new ``points``.
+
+        Deleting first means a re-embed (e.g. after the active set changed) never
+        leaves stale points from the old set behind.
+        """
+        self._delete_document(collection, source_type, doc_id)
+        if points:
+            self._client.upsert(collection, points=points)
+
+    def _delete_document(self, collection: str, source_type: str, doc_id: str) -> None:
+        """Delete all points of one document from ``collection`` (by payload filter)."""
+        self._client.delete(
+            collection,
+            points_selector=models.FilterSelector(filter=_doc_filter(source_type, doc_id)),
+        )
+
+    def delete_document(self, collection: str, source_type: str, doc_id: str) -> None:
+        """Public: remove all of a document's points from ``collection`` (GC/cleanup)."""
+        if self._client.collection_exists(collection):
+            self._delete_document(collection, source_type, doc_id)
+
+    def count(self, collection: str) -> int:
+        """Return the number of points in ``collection`` (for tests/stats)."""
+        return self._client.count(collection).count
+
+    def close(self) -> None:
+        """Release the Qdrant store (and its directory lock)."""
+        self._client.close()
+
+
+def _doc_filter(source_type: str, doc_id: str) -> models.Filter:
+    """Build a Qdrant payload filter matching one document's points."""
+    return models.Filter(
+        must=[
+            models.FieldCondition(key="source_type", match=models.MatchValue(value=source_type)),
+            models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id)),
+        ]
+    )

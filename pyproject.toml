@@ -11,6 +11,7 @@ dependencies = [
     "argcomplete",
     "markdownify",
     "pypdf",
+    "qdrant-client",
 ]
 
 [project.optional-dependencies]
