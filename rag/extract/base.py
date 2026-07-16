@@ -152,3 +152,15 @@ class Extractor(ABC):
         * ``secrets`` — the shared secret resolver (for passwords/API keys).
         * ``options`` — plugin-specific CLI arguments.
         """
+
+    def source_url(
+        self, doc_id: str, stable: Mapping[str, Any], transient: Mapping[str, Any]
+    ) -> str | None:
+        """Return a URL linking to the original source of a document, or ``None``.
+
+        Given a document's id and its stable/transient metadata, produce a URL
+        that opens the original item (e.g. the message in a mail client). The
+        default is ``None`` (no link); plugins override when a meaningful URL
+        exists. Not abstract — a plugin may legitimately have no source URL.
+        """
+        return None

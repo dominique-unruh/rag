@@ -20,6 +20,7 @@ from email.utils import getaddresses, parsedate_to_datetime, parseaddr
 from email.header import decode_header
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, quote_plus
 
 from ....errors import ConfigError
 from ....secrets import Secrets
@@ -28,6 +29,19 @@ from .imap import extract_account
 
 # MIME type recorded for the raw email blobs.
 _EMAIL_MIME: str = "message/rfc822"
+
+# Base URL for mail-link source links (the part before the '#'; the mail-link
+# format leaves it unspecified). See
+# https://github.com/dominique-unruh/mail-link/wiki/Mail-link-format
+_MAIL_LINK_BASE: str = "https://qis.rwth-aachen.de/people/unruh/tools/mail-link/"
+
+# Mapping of mail-link fragment field name -> stable-metadata key that fills it.
+_MAIL_LINK_FIELDS: tuple[tuple[str, str], ...] = (
+    ("subject", "subject"),
+    ("date", "date"),
+    ("from", "sender"),
+    ("to", "recipients"),
+)
 
 # TODO: use existing email library, don't implement own parsers (e.g., _decode_mime_words).
 
@@ -138,6 +152,25 @@ def _accounts_from_config(config: Mapping[str, Any]) -> list[Mapping[str, Any]]:
 
 class EmailExtractor(Extractor):
     """Extractor that syncs one or more IMAP accounts into the store."""
+
+    def source_url(
+        self, doc_id: str, stable: Mapping[str, Any], transient: Mapping[str, Any]
+    ) -> str | None:
+        """Return a mail-link URL for the message.
+
+        Format: ``<base>#<message-id>(&field=value)*`` with each component
+        percent-encoded UTF-8 (spaces as ``+``). The ``doc_id`` is the Message-ID;
+        the fragment also carries subject/date/from/to when available. See
+        https://github.com/dominique-unruh/mail-link/wiki/Mail-link-format
+        """
+        # The message-id heads the fragment (fully percent-encoded).
+        parts = [quote(doc_id, safe="")]
+        # Append the descriptive fields that are present in stable metadata.
+        for field, key in _MAIL_LINK_FIELDS:
+            value = stable.get(key)
+            if value:
+                parts.append(f"{field}={quote_plus(str(value))}")
+        return _MAIL_LINK_BASE + "#" + "&".join(parts)
 
     def run(
         self,

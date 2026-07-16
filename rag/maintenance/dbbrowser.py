@@ -132,6 +132,24 @@ def _display_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _source_url(
+    source_type: str, doc_id: str, stable: dict[str, Any], transient: dict[str, Any]
+) -> str | None:
+    """Ask the owning extractor for a source URL for this document, or ``None``.
+
+    Loads the plugin for ``source_type`` and calls its ``source_url``; any
+    failure (unknown plugin, plugin error) degrades gracefully to no link.
+    """
+    # Imported lazily to keep the module import light and avoid cycles.
+    from ..extract.discovery import load_plugin
+
+    try:
+        return load_plugin(source_type)().source_url(doc_id, stable, transient)
+    except Exception:
+        # A browser must never break because a plugin's URL logic raised.
+        return None
+
+
 def _download_name(doc_id: str, mime: str | None) -> str:
     """Return a safe download filename for ``doc_id`` with a mime-derived extension."""
     # Keep only filename-safe characters from the (possibly URL/@-laden) doc_id.
@@ -185,6 +203,8 @@ def _create_app(database: IdleDatabase, blobs: BlobStore) -> Flask:
         row = fetch_doc()
         if row is None:
             return _not_found()
+        stable = json.loads(row["stable"])
+        transient = json.loads(row["transient"])
         return jsonify(
             {
                 "source_type": row["source_type"],
@@ -192,8 +212,10 @@ def _create_app(database: IdleDatabase, blobs: BlobStore) -> Flask:
                 "version": row["version"],
                 "blob_hash": row["blob_hash"],
                 "updated_at": row["updated_at"],
-                "stable": json.loads(row["stable"]),
-                "transient": json.loads(row["transient"]),
+                "stable": stable,
+                "transient": transient,
+                # Link to the original source, if the owning extractor provides one.
+                "source_url": _source_url(row["source_type"], row["doc_id"], stable, transient),
             }
         )
 
@@ -419,15 +441,26 @@ function applyHash() {
 // Follow the hash when the user pastes/edits a deep link.
 window.addEventListener('hashchange', applyHash);
 
-// Arrow up/down move the selection (when the list has rows). Ignored while
+// How many rows make up roughly one screenful of the list viewport.
+function pageStep() {
+  const rh = rowEls[0] ? rowEls[0].offsetHeight : 20;
+  return Math.max(1, Math.floor(listEl.clientHeight / rh) - 1);
+}
+
+// Arrow and Page keys move the selection (when the list has rows). Ignored while
 // typing in an input so the search field's caret keys still work.
 document.addEventListener('keydown', (e) => {
-  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+  const steps = { ArrowDown: 1, ArrowUp: -1, PageDown: 0, PageUp: 0 };
+  if (!(e.key in steps)) return;
   if (!rowEls.length || e.target.tagName === 'INPUT') return;
   e.preventDefault();
-  // Start from the top on first keypress if nothing is selected yet.
-  const base = selIndex < 0 ? (e.key === 'ArrowDown' ? -1 : 0) : selIndex;
-  selectRow(base + (e.key === 'ArrowDown' ? 1 : -1));
+  // Page keys move by a screenful; arrows by one.
+  let delta = steps[e.key];
+  if (e.key === 'PageDown') delta = pageStep();
+  else if (e.key === 'PageUp') delta = -pageStep();
+  // Start from the top/bottom on first keypress if nothing is selected yet.
+  const base = selIndex < 0 ? (delta > 0 ? -1 : 0) : selIndex;
+  selectRow(base + delta);
 });
 
 // --- search: jump to rows whose text (or doc_id) contains the query ---
@@ -491,13 +524,17 @@ async function loadList() {
   applyHash();
 }
 
-// Render a key/value object as a metadata table.
-function metaTable(obj) {
+// Render a key/value object as a metadata table. `links` optionally maps a key
+// to an href, rendering that key's value as a hyperlink.
+function metaTable(obj, links) {
   const keys = Object.keys(obj);
   if (!keys.length) return '<p class="muted">(none)</p>';
-  return '<table class="meta">' + keys.map(k =>
-    `<tr><td>${esc(k)}</td><td>${esc(typeof obj[k] === 'object' ? JSON.stringify(obj[k]) : obj[k])}</td></tr>`
-  ).join('') + '</table>';
+  return '<table class="meta">' + keys.map(k => {
+    const raw = typeof obj[k] === 'object' ? JSON.stringify(obj[k]) : obj[k];
+    const href = links && links[k];
+    const cell = href ? `<a href="${esc(href)}">${esc(raw)}</a>` : esc(raw);
+    return `<tr><td>${esc(k)}</td><td>${cell}</td></tr>`;
+  }).join('') + '</table>';
 }
 
 // Load and show the detail (metadata + preview + download) for one document.
@@ -506,8 +543,10 @@ async function showDetail(st, id) {
   const doc = await (await fetch('/api/document?' + q)).json();
   const core = { source_type: doc.source_type, doc_id: doc.doc_id,
                  version: doc.version, updated_at: doc.updated_at, blob_hash: doc.blob_hash };
+  // Link the doc_id to the source URL the extractor provided, if any.
+  const links = doc.source_url ? { doc_id: doc.source_url } : null;
   detailEl.innerHTML =
-      '<h2>Document</h2>' + metaTable(core)
+      '<h2>Document</h2>' + metaTable(core, links)
     + '<h2>Stable metadata</h2>' + metaTable(doc.stable)
     + '<h2>Transient metadata</h2>' + metaTable(doc.transient)
     + '<h2>Content</h2>'
