@@ -63,7 +63,14 @@ CREATE TABLE translation_sets (
 CREATE UNIQUE INDEX idx_active_set
     ON translation_sets(source_type, doc_id) WHERE is_active = 1;
 
--- One row per output blob ("part") within a translation set (PLAN §3.2, §5.1).
+"""
+
+# The translation_parts and embeddings tables — kept as standalone constants so
+# both the initial migration and the catch-up migration 0002 create the SAME
+# schema (single source of truth, no drift).
+
+# One row per output blob ("part") within a translation set (PLAN §3.2, §5.1).
+_DDL_TRANSLATION_PARTS: str = """
 CREATE TABLE translation_parts (
     id         INTEGER PRIMARY KEY,
     set_id     INTEGER NOT NULL REFERENCES translation_sets(id) ON DELETE CASCADE,
@@ -77,10 +84,11 @@ CREATE TABLE translation_parts (
     part_key   TEXT GENERATED ALWAYS AS (json(sub_doc_id)) VIRTUAL,
     UNIQUE (set_id, part_key)
 );
+"""
 
--- Join of parts x embedding models: one row per (part, model) embedded, so
--- staleness is tracked per model. A part may have several rows, one per model
--- (PLAN §3.2, §6). Absence of a row means "not yet embedded by that model".
+# Join of parts x embedding models: one row per (part, model) embedded, so
+# staleness is tracked per model (PLAN §3.2, §6).
+_DDL_EMBEDDINGS: str = """
 CREATE TABLE embeddings (
     source_type TEXT    NOT NULL,
     doc_id      TEXT    NOT NULL,
@@ -96,14 +104,32 @@ CREATE TABLE embeddings (
 
 def _migration_0001(conn: sqlite3.Connection) -> None:
     """Apply migration 0001 — create the initial schema."""
-    # executescript runs the multi-statement DDL block above.
+    # documents + translation_sets, then the shared parts/embeddings DDL.
     conn.executescript(_MIGRATION_0001_INIT)
+    conn.executescript(_DDL_TRANSLATION_PARTS)
+    conn.executescript(_DDL_EMBEDDINGS)
+
+
+def _migration_0002(conn: sqlite3.Connection) -> None:
+    """Recreate translation_parts + embeddings with the current schema.
+
+    Catch-up for databases created before ``translation_parts`` stored
+    ``sub_doc_id`` (and ``embeddings`` used the ``model`` column). Both tables are
+    empty in practice (no translations/embeddings existed under the old schema),
+    so dropping and recreating them is safe and loses nothing. On a fresh database
+    this simply rebuilds the identical tables.
+    """
+    # Drop in FK order: embeddings references translation_parts.
+    conn.executescript("DROP TABLE IF EXISTS embeddings; DROP TABLE IF EXISTS translation_parts;")
+    conn.executescript(_DDL_TRANSLATION_PARTS)
+    conn.executescript(_DDL_EMBEDDINGS)
 
 
 # Ordered list of migrations. Index i (0-based) upgrades user_version from i to
 # i+1. Appending a new migration is the only supported way to change the schema.
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migration_0001,
+    _migration_0002,
 ]
 
 
