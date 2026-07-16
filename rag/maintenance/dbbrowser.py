@@ -19,7 +19,9 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 import webbrowser
+from html import escape as _h
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,11 @@ from flask import Flask, Response, jsonify, request
 
 from ..blobs import BlobStore
 from ..config import Config
+
+# Unique id for this server process. The reloader restarts the process on a
+# source change, giving a new id — the main page polls it and reloads when it
+# changes, so the browser follows the auto-reload.
+_BOOT_ID: str = uuid.uuid4().hex
 
 # Seconds of inactivity after which the shared DB connection is closed.
 _IDLE_SECONDS: float = 5.0
@@ -150,6 +157,68 @@ def _source_url(
         return None
 
 
+def _kv_table_html(data: dict[str, Any]) -> str:
+    """Render a metadata dict as a small HTML key/value table."""
+    if not data:
+        return "<p><em>(none)</em></p>"
+    rows = "".join(
+        f"<tr><th>{_h(str(k))}</th><td>{_h(v if isinstance(v, str) else json.dumps(v))}</td></tr>"
+        for k, v in data.items()
+    )
+    return f"<table class='meta'>{rows}</table>"
+
+
+def _translation_page_html(
+    source_type: str,
+    doc_id: str,
+    translator_name: str,
+    source_url: str | None,
+    translations: list[Any],
+) -> str:
+    """Render the translation dry-run page: source link + one foldable section per part."""
+    # A link to the original source, if the extractor provides one.
+    source_link = (
+        f"<p><a href='{_h(source_url)}'>source: {_h(source_url)}</a></p>"
+        if source_url
+        else "<p class='muted'>(no source link)</p>"
+    )
+    if not translations:
+        sections = "<p class='muted'>(translator produced no translations)</p>"
+    else:
+        parts: list[str] = []
+        for t in translations:
+            sub = "/".join(t.sub_doc_id) or "(root)"
+            parts.append(
+                "<details open><summary>" + _h(sub) + "</summary>"
+                + "<h4>sub_doc_id</h4><code>" + _h(json.dumps(t.sub_doc_id)) + "</code>"
+                + "<h4>metadata</h4>" + _kv_table_html(t.stable_metadata)
+                + "<h4>debug_info</h4><pre>" + _h(t.debug_info or "(none)") + "</pre>"
+                + "<h4>content</h4><pre class='content'>" + _h(t.text) + "</pre>"
+                + "</details>"
+            )
+        sections = "\n".join(parts)
+    return (
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        f"<title>translate: {_h(doc_id)}</title>"
+        "<style>"
+        "body{font:14px/1.5 system-ui,sans-serif;margin:16px;max-width:1000px}"
+        ".muted{color:#888}"
+        "table.meta{border-collapse:collapse;margin:4px 0}"
+        "table.meta th{text-align:left;padding:2px 10px 2px 0;color:#555;vertical-align:top}"
+        "table.meta td{padding:2px 0}"
+        "details{border:1px solid #ddd;border-radius:5px;padding:6px 10px;margin:8px 0}"
+        "summary{font-weight:600;cursor:pointer}"
+        "h4{margin:8px 0 2px;font-size:12px;color:#666;text-transform:uppercase}"
+        "pre{background:#f7f7f9;border:1px solid #e2e2e6;padding:8px;overflow:auto;white-space:pre-wrap}"
+        "pre.content{max-height:none}"
+        "code{background:#f7f7f9;padding:1px 4px}"
+        "</style></head><body>"
+        f"<h1>Translation dry-run</h1>"
+        f"<p><strong>{_h(source_type)}:{_h(doc_id)}</strong> — translator: <code>{_h(translator_name)}</code></p>"
+        f"{source_link}{sections}</body></html>"
+    )
+
+
 def _download_name(doc_id: str, mime: str | None) -> str:
     """Return a safe download filename for ``doc_id`` with a mime-derived extension."""
     # Keep only filename-safe characters from the (possibly URL/@-laden) doc_id.
@@ -186,6 +255,11 @@ def _create_app(database: IdleDatabase, blobs: BlobStore) -> Flask:
     def index() -> Response:
         """Serve the single-page app."""
         return Response(_INDEX_HTML, mimetype="text/html")
+
+    @app.get("/api/bootid")
+    def api_bootid() -> Response:
+        """Return this server process's boot id (for main-page auto-reload)."""
+        return Response(_BOOT_ID, mimetype="text/plain")
 
     @app.get("/api/documents")
     def api_documents() -> Response:
@@ -245,6 +319,34 @@ def _create_app(database: IdleDatabase, blobs: BlobStore) -> Flask:
             headers["Content-Disposition"] = f'attachment; filename="{filename}"'
         # Otherwise serve inline with the document's own mime-type.
         return Response(data, mimetype=mime, headers=headers)
+
+    @app.get("/translate")
+    def translate_preview() -> Response:
+        """Full HTML page: a translation dry-run of one document (opened in a new tab)."""
+        row = fetch_doc()
+        if row is None:
+            return _not_found()
+        stable = json.loads(row["stable"])
+        transient = json.loads(row["transient"])
+        translator_name = request.args.get("translator", "dispatch")
+        # Lazy imports: the translate package is only needed for this endpoint.
+        from ..translate.base import Document
+        from ..translate.discovery import load_translator
+
+        try:
+            content = blobs.get(row["blob_hash"])
+            translator = load_translator(translator_name)
+            document = Document(row["doc_id"], [], content, stable, transient)
+            translations = translator.translate(document)  # dry-run: nothing stored
+        except Exception as exc:  # surface any translator/loader error in the page
+            body = f"<h1>Translation error</h1><pre>{_h(str(exc))}</pre>"
+            return Response(f"<!doctype html><meta charset=utf-8>{body}",
+                            mimetype="text/html", status=500)
+        source_url = _source_url(row["source_type"], row["doc_id"], stable, transient)
+        html = _translation_page_html(
+            row["source_type"], row["doc_id"], translator_name, source_url, translations
+        )
+        return Response(html, mimetype="text/html; charset=utf-8")
 
     def _not_found(message: str = "document not found") -> Response:
         """Return a 404 JSON error."""
@@ -336,6 +438,7 @@ _INDEX_HTML: str = """<!doctype html>
   <div id="detail"><p class="muted">Select a row above.</p></div>
 </main>
 <div id="ctxmenu">
+  <div data-act="translate">Translate (dry-run)</div>
   <div data-act="copysql">Copy SQL</div>
   <div data-act="copydel">Copy delete command</div>
 </div>
@@ -387,10 +490,10 @@ document.addEventListener('click', hideMenu);
 document.addEventListener('scroll', hideMenu, true);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideMenu(); });
 
-// "Copy SQL" action.
+// "Copy SQL" action — a self-contained SELECT for that one row.
 menuEl.querySelector('[data-act="copysql"]').onclick = (e) => {
   e.stopPropagation();
-  if (menuTarget) copyText(rowSql(menuTarget.st, menuTarget.id));
+  if (menuTarget) copyText('SELECT * ' + rowSql(menuTarget.st, menuTarget.id));
   hideMenu();
 };
 
@@ -398,6 +501,16 @@ menuEl.querySelector('[data-act="copysql"]').onclick = (e) => {
 menuEl.querySelector('[data-act="copydel"]').onclick = (e) => {
   e.stopPropagation();
   if (menuTarget) copyText(rowDeleteCmd(menuTarget.st, menuTarget.id));
+  hideMenu();
+};
+
+// "Translate (dry-run)" action — open the preview page in a new tab.
+menuEl.querySelector('[data-act="translate"]').onclick = (e) => {
+  e.stopPropagation();
+  if (menuTarget) {
+    const q = `source_type=${encodeURIComponent(menuTarget.st)}&doc_id=${encodeURIComponent(menuTarget.id)}`;
+    window.open('/translate?' + q, '_blank');
+  }
   hideMenu();
 };
 
@@ -550,13 +663,27 @@ async function showDetail(st, id) {
     + '<h2>Stable metadata</h2>' + metaTable(doc.stable)
     + '<h2>Transient metadata</h2>' + metaTable(doc.transient)
     + '<h2>Content</h2>'
-    + `<div class="bar"><a class="btn" href="/api/content?${q}&download=1">Download</a></div>`
+    + `<div class="bar"><a class="btn" href="/api/content?${q}&download=1">Download</a>`
+    + ` <a class="btn" href="/translate?${q}" target="_blank">Translate (dry-run)</a></div>`
     + '<pre id="preview" class="muted">Loading preview…</pre>';
   const txt = await (await fetch('/api/content?' + q + '&preview=1')).text();
   const pre = document.getElementById('preview');
   pre.classList.remove('muted');
   pre.textContent = txt;
 }
+
+// Auto-reload the page when the server process restarts (dev auto-reload).
+// Poll the boot id; a change means a new server process → reload.
+let bootId = null;
+async function checkBoot() {
+  try {
+    const b = await (await fetch('/api/bootid')).text();
+    if (bootId === null) bootId = b;
+    else if (b !== bootId) location.reload();
+  } catch (_) { /* server mid-restart; ignore and retry */ }
+}
+setInterval(checkBoot, 1500);
+checkBoot();
 
 loadList();
 </script>

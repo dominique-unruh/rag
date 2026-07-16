@@ -8,6 +8,7 @@ translator dispatches its attachments back through here).
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 
 from ..base import Document, Translation, Translator
 
@@ -39,7 +40,14 @@ class Dispatch(Translator):
                 file=sys.stderr,
             )
             return []
-        return target.translate(document)
+        results = target.translate(document)
+        # Tag each translation's debug_info with where it was dispatched (nested
+        # dispatches accumulate a trace). debug_info is test-only, never stored.
+        label = f"Dispatched to {type(target).__name__}"
+        return [
+            replace(t, debug_info=f"{t.debug_info}\n{label}" if t.debug_info else label)
+            for t in results
+        ]
 
 
 # Module-level instance selected by --translator dispatch (the default).

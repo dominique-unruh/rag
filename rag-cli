@@ -24,9 +24,17 @@ fi
 # explicitly into the venv rather than probing imports, because a venv created
 # with --system-site-packages can satisfy imports from system packages while its
 # own site remains empty.
-_SENTINEL="$VENV/.rag-deps-installed"
 _DEPS=(pyyaml keyring secretstorage jeepney flask argcomplete markdownify pypdf)
-if [ ! -f "$_SENTINEL" ]; then
+# The sentinel is keyed BOTH by Python version and by the dependency list:
+# - Python version, because a shared .venv used from interpreters of different
+#   versions has separate site-packages (lib/pythonX.Y/…); each version must
+#   install its own packages.
+# - dependency list, so adding a dep reinstalls (a bare "file exists" check would
+#   silently miss newly-added dependencies).
+_PYVER="$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+_SENTINEL="$VENV/.rag-deps-installed-$_PYVER"
+_WANT="${_DEPS[*]}"
+if [ "$(cat "$_SENTINEL" 2>/dev/null)" != "$_WANT" ]; then
     echo "rag-cli: installing dependencies into $VENV ..." >&2
     if command -v uv >/dev/null 2>&1; then
         # uv-managed venv (no pip inside): install with uv against this venv.
@@ -37,7 +45,7 @@ if [ ! -f "$_SENTINEL" ]; then
         "$PY" -m pip install -q --upgrade pip
         "$PY" -m pip install -q "${_DEPS[@]}"
     fi
-    touch "$_SENTINEL"
+    printf '%s' "$_WANT" > "$_SENTINEL"
 fi
 
 # Force the pure-python SecretService keyring backend (provided by secretstorage,

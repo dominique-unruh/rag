@@ -57,6 +57,16 @@ def test_email_translator_body_and_attachment() -> None:
     assert all(p.doc_id == "m1" for p in parts)
 
 
+def test_dispatch_tags_debug_info() -> None:
+    """Dispatch records where it routed each translation (nested trace)."""
+    doc = Document("m1", [], _EMAIL, {"mime-type": "message/rfc822"}, {})
+    by_sub = {tuple(p.sub_doc_id): p for p in dispatch.translate(doc)}
+    # Body routed straight to Email.
+    assert by_sub[("body",)].debug_info == "Dispatched to Email"
+    # Attachment: inner dispatch -> Text, then outer dispatch -> Email.
+    assert by_sub[("attachment:1",)].debug_info == "Dispatched to Text\nDispatched to Email"
+
+
 def test_pdf_translator_returns_single_part() -> None:
     """The PDF translator returns exactly one translation for a valid PDF."""
     from pypdf import PdfWriter

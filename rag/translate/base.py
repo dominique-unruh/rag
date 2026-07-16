@@ -66,6 +66,10 @@ class Translation:
     stable_metadata: dict[str, Any] = field(default_factory=dict)
     """Per-part stable metadata."""
 
+    debug_info: str = ""
+    """Optional free-text debugging info. Has no effect on the pipeline and is
+    **never stored in the DB** — for testing/inspection only."""
+
 
 class Translator(ABC):
     """Converts one document into a list of translations.
