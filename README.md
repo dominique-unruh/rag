@@ -30,6 +30,12 @@ rag extract email since='1w ago' count=100 folder=INBOX
 Extraction writes document metadata to a SQLite database and raw source bytes to
 a content-addressed blob store, both under the configured `storage.dir`.
 
+## Browse the database
+
+```sh
+rag maintenance db-browser        # opens a local web UI in your browser
+```
+
 ## Test
 
 ```sh

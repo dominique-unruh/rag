@@ -58,6 +58,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "options", nargs="*", metavar="key=value",
         help="plugin-specific options (e.g. since='1w ago' count=100 folder=INBOX)",
     )
+
+    # --- maintenance subcommand ------------------------------------------
+    maintenance = subparsers.add_parser("maintenance", help="run a maintenance tool")
+    maintenance.add_argument("tool", choices=["db-browser"], help="which maintenance tool")
+    maintenance.add_argument("--host", default="127.0.0.1", help="bind host (default: %(default)s)")
+    maintenance.add_argument("--port", type=int, default=8765, help="bind port (default: %(default)s)")
+    maintenance.add_argument("--no-open", action="store_true", help="do not open a browser")
     return parser
 
 
@@ -69,6 +76,16 @@ def _cmd_extract(args: argparse.Namespace) -> None:
     # Pass the verbose flag through to the plugin as a reserved option.
     options["verbose"] = args.verbose
     run_extraction(args.source_type, options, config)
+
+
+def _cmd_maintenance(args: argparse.Namespace) -> None:
+    """Handle ``rag maintenance`` — dispatch to the selected maintenance tool."""
+    config = Config.load(args.config)
+    if args.tool == "db-browser":
+        # Imported lazily so the HTTP server code loads only when needed.
+        from .maintenance.dbbrowser import serve
+
+        serve(config, host=args.host, port=args.port, open_browser=not args.no_open)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -83,6 +100,8 @@ def main(argv: list[str] | None = None) -> int:
         # Dispatch to the selected subcommand handler.
         if args.command == "extract":
             _cmd_extract(args)
+        elif args.command == "maintenance":
+            _cmd_maintenance(args)
         else:  # pragma: no cover - argparse enforces valid commands
             parser.error(f"unknown command {args.command!r}")
     except RagError as exc:

@@ -521,7 +521,14 @@ A top-level dispatcher with subcommands (each also runnable as a package
   - **dry-run mode**: don't store in DB (allowed even on a dirty repo).
 - **`embed`** — embed a filtered subset; auto-updates changed translations.
 - **`chat`** — model and mode selectable on the command line.
-- **`maintenance`**:
+- **`maintenance <tool>`**:
+  - `db-browser` — a local web UI (stdlib HTTP server, no extra deps) for
+    browsing the extraction database. Left navbar of tools (currently just
+    "Extraction"); the Extraction view is a split screen — top: the `documents`
+    rows with their most relevant fields; bottom: the selected document's full
+    metadata (stable + transient) as a table, plus a content preview and a
+    download button (using the document's mime-type). The DB connection is opened
+    lazily and auto-released after 5 s of inactivity.
   - GC-like tasks (filter-driven): remove unreferenced blobs, prune inactive
     translations, drop orphaned embeddings.
   - stats.
