@@ -130,7 +130,7 @@ def test_delete_cascades_to_translations_and_embeddings(
         "VALUES (1, 1, 'body', 'h', jsonb('{}'))"
     )
     conn.execute(
-        "INSERT INTO embeddings (source_type, doc_id, set_id, part_id, embed_model, embedded_at) "
+        "INSERT INTO embeddings (source_type, doc_id, set_id, part_id, model, embedded_at) "
         "VALUES ('email', 'a', 1, 1, 'm', 't')"
     )
     conn.commit()

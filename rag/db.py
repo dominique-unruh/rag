@@ -73,14 +73,18 @@ CREATE TABLE translation_parts (
     UNIQUE (set_id, part_key)
 );
 
--- Bookkeeping of what is currently embedded, at part granularity (PLAN §3.2).
+-- Join of parts x embedding models: one row per (part, model) embedded, so
+-- staleness is tracked per model. A part may have several rows, one per model
+-- (PLAN §3.2, §6). Absence of a row means "not yet embedded by that model".
 CREATE TABLE embeddings (
     source_type TEXT    NOT NULL,
     doc_id      TEXT    NOT NULL,
     set_id      INTEGER NOT NULL REFERENCES translation_sets(id) ON DELETE CASCADE,
     part_id     INTEGER NOT NULL REFERENCES translation_parts(id) ON DELETE CASCADE,
-    embed_model TEXT    NOT NULL,               -- model + dim; invalidates on change
-    embedded_at TEXT    NOT NULL
+    model       TEXT    NOT NULL,               -- embedding model id (own index/collection)
+    embedded_at TEXT    NOT NULL,
+    -- A part is embedded at most once per model.
+    PRIMARY KEY (part_id, model)
 );
 """
 

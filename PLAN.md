@@ -133,22 +133,25 @@ kept.
 - Unique `(set_id, part_key)`.
 - Deleting a set cascades to its parts.
 
-**`embeddings`** (bookkeeping for module 3) — tracks what is currently indexed
-in the vector store so staleness can be detected. Granularity is the **part**
-(each part is chunked and embedded independently):
+**`embeddings`** (bookkeeping for module 3) — the **join between parts and
+embedding models**: one row per `(part, model)` actually embedded, so staleness
+can be detected per model. A part may have several rows (one per model). See §6
+for the multi-model design.
 
-| Column          | Type    | Notes |
-|-----------------|---------|-------|
-| source_type     | TEXT    | |
-| doc_id          | TEXT    | |
-| set_id          | INTEGER | Which `translation_sets.id` is currently embedded. |
-| part_id         | INTEGER | Which `translation_parts.id` these points came from. |
-| embed_model     | TEXT    | Model + dim used (invalidates on change). |
-| embedded_at     | TEXT    | Timestamp. |
+| Column       | Type    | Notes |
+|--------------|---------|-------|
+| source_type  | TEXT    | |
+| doc_id       | TEXT    | |
+| set_id       | INTEGER | Which `translation_sets.id` is embedded for this model. |
+| part_id      | INTEGER | Which `translation_parts.id` these points came from. |
+| model        | TEXT    | The embedding **model id** (from the registry; its own index/collection). |
+| embedded_at  | TEXT    | Timestamp. |
 
-Re-embedding is required when a document's active `set_id` differs from the
-embedded one (the whole document is re-embedded across all parts of the new
-set), or the embed model/dim changed.
+- Primary key: `(part_id, model)` — a part is embedded at most once per model.
+- Re-embedding for a given model is required when a document's active `set_id`
+  differs from the row's embedded `set_id`; each model is refreshed independently
+  on its own pass. Absence of a row for a `(part, model)` means "not yet embedded
+  by that model" — a normal state, not an error.
 
 **`schema_version`** — a single integer row holding the DB's current schema
 version; used by the migration mechanism below.
@@ -469,26 +472,58 @@ require a clean repo:
 
 ## 6. Module 3 — Embedding / RAG Index
 
-Chunks the parts of each active translation set and embeds them into Qdrant.
+Chunks the parts of each active translation set and embeds them into one or more
+vector indices — **one index per embedding model**. The system supports several
+embedding models side by side (e.g. a strong dense model plus a sparse/lexical
+one for hybrid retrieval, or an old and a new dense model during a migration).
 
-- **All parts of the active set are embedded**; each part is chunked
-  independently.
-- Chunking: configurable size / overlap.
-- Embeds each chunk; the Qdrant payload carries the source reference
-  (`source_type`, `doc_id`) plus the `set_id` and `part_id` it came from — for
-  filtering and cleanup.
-- **Auto-update**: when a document's active set changes (detected via the
-  `embeddings` table, §3.2), *all* points for that document (across every part)
-  are deleted and the new set's parts are re-embedded — so parts never mix across
-  sets.
-- Selectable by filter (like translate).
-- The collection records the embed model + dimension; changing either
-  invalidates the collection and forces a full re-embed. The tooling detects a
-  mismatch and refuses to mix vectors of different models/dims in one collection.
-- **Future option** (only when actually needed): if the embed model is changed,
-  the system may be refactored to run *two* vector collections in parallel — one
-  for documents on the old model, one on the new — migrating incrementally rather
-  than forcing an immediate full re-embed. Deferred until required.
+### 6.1 Multiple models, one index each
+
+- A **model registry** (in config) lists the enabled embedding models. Each entry
+  has: a stable **model id** (treated like a version — changing the model or its
+  parameters means a *new* id), a **type** (`dense` / `sparse`), a backend, the
+  index/collection name, and for dense models the dimension + metric + any query
+  instruction template.
+- Each model owns its **own index** (its own Qdrant collection, or a sparse
+  index). Different models never share a space — dims/metrics may differ freely.
+  They are combined only at query time (fusion, §7), never compared directly.
+- Adding a model later (e.g. bolting sparse onto a dense-only system) is just a
+  new registry entry plus its own embed passes. **No re-embedding of existing
+  models, no schema change, no migration.**
+
+### 6.2 Per-(part, model) bookkeeping
+
+The `embeddings` table (§3.2) is the **join** between parts and models: one row
+per `(part, model)` actually embedded, recording which translation `set_id` /
+`source_version` was embedded for that model and when. A part may therefore have
+several embedding rows — one per model. "Not yet embedded by model X" is a normal
+state (like a zero-active translation), never an error.
+
+### 6.3 Embedding a model (a "pass")
+
+- `embed` runs **per model** (`--model <id>`, optionally filtered like translate).
+  A pass embeds the parts that are **missing or stale for that model** and leaves
+  other models untouched. Models converge independently; the corpus is fully
+  covered once every model's passes are done.
+- Within a pass: all parts of each document's **active** set are chunked
+  (configurable size / overlap) and embedded; each point's payload carries
+  `source_type`, `doc_id`, `set_id`, `part_id` (and the model id) for filtering
+  and cleanup.
+- **Staleness** is per model: when a document's active set changes, the
+  `(part, model)` rows whose embedded `set_id` differs from the active one are
+  re-embedded on that model's next pass — the document's old points in *that
+  model's* index are deleted and the new set's parts re-embedded, so parts never
+  mix across sets.
+- A dense model records its dimension; the tooling refuses to mix vectors of
+  different dims/models within one index.
+
+### 6.4 Cross-index cleanup
+
+Deleting a document (or replacing its active set) must remove/replace its points
+in **every** model's index, and the corresponding `(part, model)` rows. The DB
+rows cascade via foreign keys (§3.2); the vector-store point removal loops over
+all model indices. Retrieval never returns a chunk for a deleted document from
+any index.
 
 ---
 
@@ -502,6 +537,14 @@ Chat interface over the RAG, with selectable modes and LLM models.
   translations, and perform web searches; it plans its own retrieval strategy.
 
 Model and mode are selectable on the command line.
+
+**Retrieval / fusion.** When several embedding models are populated (§6),
+retrieval queries each selected model's index and **fuses** the ranked lists
+(e.g. Reciprocal Rank Fusion) into one result set — this is where a dense model
+and a sparse/lexical model combine into hybrid search (semantic recall + exact
+token matches). Which models participate is a query-time choice; a model with
+incomplete coverage simply contributes what it has. (A cross-encoder reranker
+could later sit after fusion as an optional query-time stage — no index change.)
 
 ---
 
@@ -644,9 +687,11 @@ tests/
    system is proven; other source plugins deferred.)
 3. **Module 2 (translate)**: identity/pass-through translation first, then the
    git gating, inspection & dry-run modes, then AI rewriting.
-4. **Module 3 (embed)**: chunk + embed active translations, staleness-driven
-   re-embed.
-5. **Module 4 (chat)**: simple mode first, then complex mode.
+4. **Module 3 (embed)**: model registry + per-`(part, model)` bookkeeping;
+   model-scoped passes (start with one dense model), staleness-driven re-embed,
+   cross-index cleanup. Add sparse / more models later with no schema change.
+5. **Module 4 (chat)**: simple mode first, then complex mode; fuse multiple
+   embedding indices when present.
 6. **Additional extraction plugins** (notes, chats, …) and **maintenance**
    (GC, stats), once email has proven the design.
 7. Iterate: more plugins, more filters, context-aware translation.
