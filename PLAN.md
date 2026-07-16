@@ -122,15 +122,16 @@ kept.
 
 **`translation_parts`** — one row per output blob within a set.
 
-| Column     | Type    | Notes |
-|------------|---------|-------|
-| id         | INTEGER | Surrogate primary key. |
-| set_id     | INTEGER | FK → `translation_sets.id`. |
-| part_key   | TEXT    | Stable identifier of the part within its set, e.g. `body`, `attachment:1`, `attachment:invoice.pdf`. |
-| blob_hash  | TEXT    | Reference to this part's translated Markdown blob. |
-| metadata   | JSONB   | Per-part metadata (may differ between parts, e.g. attachment filename / mime-type / OCR flag). |
+| Column      | Type    | Notes |
+|-------------|---------|-------|
+| id          | INTEGER | Surrogate primary key. |
+| set_id      | INTEGER | FK → `translation_sets.id`. |
+| sub_doc_id  | JSONB   | The part's `sub_doc_id` — a **list of strings** identifying the part within its document (e.g. `["body"]`, `["attachment:1","body"]`). Source of truth. |
+| blob_hash   | TEXT    | Reference to this part's translated Markdown blob. |
+| metadata    | JSONB   | Per-part metadata (may differ between parts, e.g. attachment filename / mime-type / OCR flag). |
+| part_key    | TEXT    | **Generated** canonical text of `sub_doc_id` (`json(sub_doc_id)`) — used for the uniqueness constraint and lookups; always in sync by construction. |
 
-- Unique `(set_id, part_key)`.
+- Unique `(set_id, part_key)`, i.e. one part per distinct `sub_doc_id` in a set.
 - Deleting a set cascades to its parts.
 
 **`embeddings`** (bookkeeping for module 3) — the **join between parts and
@@ -468,6 +469,127 @@ require a clean repo:
 - **Inspection mode**: write the translation result to a text file for review.
 - **Dry-run mode**: run the translation but do not store it in the DB.
 
+### 5.1 Translator API
+
+The actual conversion work is done by a **`Translator`** — an abstract class with
+a single method:
+
+```python
+class Translator(ABC):
+    """Converts one document into a list of translations. Must be STATELESS —
+    an instance holds no per-document state and can be reused/shared freely."""
+
+    @abstractmethod
+    def translate(self, document: "Document") -> "list[Translation]":
+        """Translate one document into zero or more Markdown translations."""
+```
+
+**`Document`** — everything a translator needs about one input:
+
+```python
+@dataclass(frozen=True)
+class Document:
+    doc_id: str                       # the source document id
+    sub_doc_id: list[str]             # path within the document (see below)
+    content: bytes                    # raw bytes to translate
+    stable_metadata: dict[str, Any]   # from the documents row (or a synthetic doc)
+    transient_metadata: dict[str, Any]
+
+    @property
+    def mime_type(self) -> "str | None":
+        """Convenience accessor — the mime type lives in the metadata, not as a
+        separate field. Equivalent to stable_metadata.get("mime-type")."""
+        return self.stable_metadata.get("mime-type")
+```
+
+**`Translation`** — one produced Markdown part:
+
+```python
+@dataclass(frozen=True)
+class Translation:
+    doc_id: str                       # MUST equal the source document's doc_id
+    sub_doc_id: list[str]             # identifies this part within the document
+    text: str                         # the Markdown result
+    stable_metadata: dict[str, Any]   # per-part metadata
+    # NOTE: no transient metadata — translations carry stable metadata only.
+```
+
+**`sub_doc_id`** is a list identifying a part *within* a document, so a translator
+can recurse (e.g. an email whose attachment is itself an email). For a document
+coming straight from the extraction DB it is the **empty list** `[]`. Translators
+extend it as they descend (email body → `[..., "body"]`; attachment *n* →
+`[..., "attachment:n"]`). It is stored **losslessly** on `translation_parts` as a
+JSONB list (`sub_doc_id`), with a generated canonical `part_key` (`json(...)`) for
+the per-set uniqueness constraint (§3.2). A `"/"`-joined form may be used for
+display only.
+
+### 5.2 What the pipeline does (not the translator)
+
+The translator is pure conversion; the **translation pipeline** owns all
+bookkeeping and DB work:
+
+- Selects source documents (filters, §5 "Selection"), builds a `Document` for
+  each (with `sub_doc_id = []`), and calls the chosen translator's `translate`.
+- **Enforces `Translation.doc_id == source doc_id`** for every returned
+  translation — individual translators are *not* trusted to get this right; a
+  mismatch is rejected. (They translate content; identity is the pipeline's.)
+- **Enforces unique `sub_doc_id`s within the returned list** (i.e. within the one
+  translation set) — a translator that emits two translations with the same
+  `sub_doc_id` is rejected before any DB write, not left to fail on the
+  `(set_id, part_key)` unique index. (Belt-and-suspenders over the DB constraint.)
+- Writes the returned list as one **translation set** + its **parts** in a single
+  transaction (§3.2), deriving each `part_key` from the translation's
+  `sub_doc_id`, storing each `text` as a Markdown blob, and attaching run-level
+  metadata (translator name, git rev, timestamp, …) to the set.
+- Because the translator is stateless and side-effect-free, dry-run/inspection
+  modes just skip the DB write.
+
+### 5.3 Selecting a translator
+
+The pipeline takes a **`--translator <name>`** argument selecting which translator
+subclass to use. Translators live in a subpackage **`translate.translators`**,
+**one file per class**; the **file name is the selectable `--translator` value**.
+Each file exposes a module-level instance named `translator` (e.g.
+`translator = Dispatch()`), which is what the pipeline loads and calls. Default:
+**`dispatch`**.
+
+### 5.4 Built-in translators (`translate/translators/`)
+
+- **`dispatch`** (`Dispatch`, default) — routes by `mime_type`:
+  - RFC 5322 email (`message/rfc822`) → `Email`;
+  - text / HTML / Markdown (`text/plain`, `text/html`, `text/markdown`) → `Text`;
+  - PDF (`application/pdf`) → `PDF`.
+  (Unknown types produce no translation — TBD as more types are added.)
+- **`email`** (`Email`):
+  - Splits the message into the **body** (main text, no attachments) and the
+    **attachments**.
+  - Body → plaintext/Markdown: if already plain text, keep it; if HTML, convert
+    with a well-supported HTML→Markdown library (§5.5). Prepend the most important
+    **decoded** header fields (e.g. `Subject: Bääh`, not the raw
+    `Subject: =?utf-8?…`). Emits one `Translation` with
+    `sub_doc_id = document.sub_doc_id + ["body"]`.
+  - For each attachment, builds a **synthetic `Document`** (same `doc_id`,
+    `sub_doc_id = document.sub_doc_id + ["attachment:<n>"]`, the attachment's
+    bytes + mime-type) and calls **`Dispatch`** to translate it (so attachments of
+    any supported type — including nested emails/PDFs — are handled uniformly).
+  - Returns the body translation plus all attachment translations.
+- **`text`** (`Text`): if the content is plain text, take it; if HTML, convert to
+  Markdown (library, §5.5); if Markdown, take it. Nothing further. One
+  `Translation`, same `sub_doc_id`.
+- **`pdf`** (`PDF`): extract the text from the PDF (a well-supported PDF library)
+  and return it as one `Translation`.
+
+### 5.5 Helpers
+
+- **HTML → Markdown** conversion, backed by an existing well-supported library
+  (e.g. markdownify / html2text) — shared by `Email` and `Text`. Placed where
+  reusable (e.g. `translate/markdown.py`).
+- **`make_translation(document, text, ...)`** — convenience constructor that
+  builds a `Translation` from a `Document` and the translated text, copying over
+  `doc_id`, `sub_doc_id` and the relevant metadata so translators don't repeat
+  that plumbing. Placed with the `Translator`/`Document`/`Translation`
+  definitions (e.g. `translate/base.py`).
+
 ---
 
 ## 6. Module 3 — Embedding / RAG Index
@@ -662,8 +784,15 @@ rag/
     plugins/
       email/         # the only source plugin for now (imap.py = IMAP I/O + sync state)
   translate/
-    base.py          # processing steps, filters, translator API
+    base.py          # Document, Translation, Translator ABC, make_translation
+    pipeline.py      # selection, doc_id enforcement, set/part DB bookkeeping
+    markdown.py      # HTML -> Markdown helper (library-backed)
     __main__.py
+    translators/     # one file per Translator; filename = --translator value
+      dispatch.py    #   translator = Dispatch()  (default; routes by mime-type)
+      email.py       #   translator = Email()
+      text.py        #   translator = Text()
+      pdf.py         #   translator = PDF()
   embed/
     __init__.py
     __main__.py
@@ -685,8 +814,10 @@ tests/
 2. **Module 1 (extract)**: general part + `Extractor` API + isolation
    enforcement; the email (IMAP) plugin end-to-end. (Work email-only until the
    system is proven; other source plugins deferred.)
-3. **Module 2 (translate)**: identity/pass-through translation first, then the
-   git gating, inspection & dry-run modes, then AI rewriting.
+3. **Module 2 (translate)**: `Translator` API + pipeline (doc_id enforcement,
+   set/part bookkeeping, `--translator` selection); the `text` translator first,
+   then `dispatch`/`email`/`pdf`; then git gating, inspection & dry-run modes,
+   then AI rewriting.
 4. **Module 3 (embed)**: model registry + per-`(part, model)` bookkeeping;
    model-scoped passes (start with one dense model), staleness-driven re-embed,
    cross-index cleanup. Add sparse / more models later with no schema change.

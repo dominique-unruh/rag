@@ -126,8 +126,8 @@ def test_delete_cascades_to_translations_and_embeddings(
         "VALUES (1, 'email', 'a', 1, jsonb('{}'), 't', 'rev', 1)"
     )
     conn.execute(
-        "INSERT INTO translation_parts (id, set_id, part_key, blob_hash, metadata) "
-        "VALUES (1, 1, 'body', 'h', jsonb('{}'))"
+        "INSERT INTO translation_parts (id, set_id, sub_doc_id, blob_hash, metadata) "
+        "VALUES (1, 1, jsonb('[\"body\"]'), 'h', jsonb('{}'))"
     )
     conn.execute(
         "INSERT INTO embeddings (source_type, doc_id, set_id, part_id, model, embedded_at) "

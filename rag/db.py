@@ -63,13 +63,18 @@ CREATE TABLE translation_sets (
 CREATE UNIQUE INDEX idx_active_set
     ON translation_sets(source_type, doc_id) WHERE is_active = 1;
 
--- One row per output blob ("part") within a translation set (PLAN §3.2).
+-- One row per output blob ("part") within a translation set (PLAN §3.2, §5.1).
 CREATE TABLE translation_parts (
-    id        INTEGER PRIMARY KEY,
-    set_id    INTEGER NOT NULL REFERENCES translation_sets(id) ON DELETE CASCADE,
-    part_key  TEXT    NOT NULL,                 -- e.g. 'body', 'attachment:invoice.pdf'
-    blob_hash TEXT    NOT NULL,                 -- reference to this part's translated blob
-    metadata  BLOB    NOT NULL,                 -- JSONB per-part metadata
+    id         INTEGER PRIMARY KEY,
+    set_id     INTEGER NOT NULL REFERENCES translation_sets(id) ON DELETE CASCADE,
+    -- The part's sub_doc_id: a JSONB list of strings identifying the part within
+    -- its document (e.g. ["body"], ["attachment:1","body"]). Source of truth.
+    sub_doc_id BLOB    NOT NULL,
+    blob_hash  TEXT    NOT NULL,                -- reference to this part's translated blob
+    metadata   BLOB    NOT NULL,               -- JSONB per-part metadata
+    -- Canonical text encoding of sub_doc_id, used for the uniqueness constraint
+    -- (and lookups). Generated from the JSONB so it always matches by construction.
+    part_key   TEXT GENERATED ALWAYS AS (json(sub_doc_id)) VIRTUAL,
     UNIQUE (set_id, part_key)
 );
 
