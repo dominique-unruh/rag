@@ -363,6 +363,12 @@ Extracts email from one or more IMAP accounts.
 - connection settings — host, username, optional `folders` (default: all) and
   `exclude_folders` (skip-list, e.g. Spam/Trash), etc. The **password comes from
   the shared secrets mechanism** (§10), never from the YAML.
+- `auth` — authentication mechanism: `login` (IMAP `LOGIN`, default), `plain`
+  (SASL `PLAIN`, for servers that reject `LOGIN` but accept it over TLS), or
+  `xoauth2` (OAuth2 bearer token, required by servers that no longer accept
+  passwords — e.g. Microsoft 365). For `xoauth2` the account may carry an
+  optional `oauth:` subtree (`tenant`, `client_id`, `scopes`, `client_secret`)
+  overriding built-in defaults; see §10 for the token handling.
 
 **Documents**:
 - `doc_id = "<message-id>"` — the bare Message-ID, **not** scoped by account.
@@ -769,6 +775,16 @@ content-addressed, are safe to back up incrementally at any time.
   headless use. No secret ever lives in the YAML or the repo. Plugins use the
   **same secret-resolution mechanism** as the core (passed into `run`, §4.1),
   not the config.
+- **OAuth2 tokens** (email `auth: xoauth2`, e.g. Microsoft 365): a one-time
+  interactive **device-code** login seeds a long-lived **refresh token**; every
+  run exchanges it for a short-lived access token used for SASL `XOAUTH2`. The
+  access token is ephemeral (in-memory only); the refresh token is persisted —
+  and rewritten whenever the server rotates it — as one file per account under
+  the email plugin's `secrets/` state subdirectory (not the keyring, since it is
+  mutable rotating state, and not the YAML). Defaults use Thunderbird's public
+  client id / `common` tenant / the `outlook.office.com` IMAP scope, overridable
+  per account via `oauth:`. Headless runs cannot do the initial login and fail
+  with an actionable message telling the user to run it once in a terminal.
 
 ### 10.1 Timestamp parsing utility
 
