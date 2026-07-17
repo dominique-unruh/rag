@@ -6,6 +6,7 @@ Ollama server. Uses the standard library (no extra HTTP dependency).
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -34,7 +35,10 @@ def _post_json(
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
-    except urllib.error.URLError as exc:
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+        # URLError covers connect/send failures; OSError/HTTPException cover a
+        # connection dropped or reset while reading the response (e.g. the server
+        # was killed mid-request — RemoteDisconnected), which urllib does not wrap.
         raise EmbedBackendError(f"embedding request to {url} failed: {exc}") from exc
 
 

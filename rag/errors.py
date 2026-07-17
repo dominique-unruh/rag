@@ -45,3 +45,12 @@ class PluginError(RagError):
 
 class TimestampError(RagError):
     """Raised when a timestamp string cannot be parsed by :mod:`rag.timestamps`."""
+
+
+class VectorStoreBusyError(RagError):
+    """Raised when the embedded vector store is locked by another process.
+
+    Embedded Qdrant allows a single writer per directory; a second opener (another
+    ``rag embed`` run, or the db-browser reading it) hits this. The fix is to close
+    the other user and retry.
+    """

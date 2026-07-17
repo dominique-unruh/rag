@@ -12,8 +12,9 @@ from rag.db import Database
 from rag.embed.chunk import chunk_text
 from rag.embed.models import chunk_params, get_model, load_models
 from rag.embed.pipeline import EmbedOptions, run_embed
+from rag.embed import vectorstore as vectorstore_mod
 from rag.embed.vectorstore import VectorStore
-from rag.errors import ConfigError
+from rag.errors import ConfigError, VectorStoreBusyError
 from rag.extract.store import SqliteStore
 from rag.translate.store import TranslationStore
 
@@ -180,6 +181,17 @@ def test_fingerprint_guard(tmp_path: Path) -> None:
     ok = Config({"storage": {"dir": str(storage)}, "embedding": safe}, storage / "c.yaml")
     assert run_embed(ok, EmbedOptions(model="test", force=True), db=db, embed_fn=_FAKE) == 1
     db.close()
+
+
+def test_vector_store_busy_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A locked Qdrant directory surfaces a clean VectorStoreBusyError."""
+    def _boom(*_a: object, **_k: object) -> object:
+        # Mimic embedded Qdrant's bare RuntimeError when the dir is already locked.
+        raise RuntimeError("Storage folder is already accessed by another instance")
+
+    monkeypatch.setattr(vectorstore_mod, "QdrantClient", _boom)
+    with pytest.raises(VectorStoreBusyError):
+        VectorStore(tmp_path / "qdrant")
 
 
 def test_embed_empty_part_records_but_no_points(tmp_path: Path) -> None:

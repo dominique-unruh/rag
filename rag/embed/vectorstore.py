@@ -12,6 +12,8 @@ from typing import Any
 
 from qdrant_client import QdrantClient, models
 
+from ..errors import VectorStoreBusyError
+
 # Map our config distance names to Qdrant's enum.
 _DISTANCES: dict[str, models.Distance] = {
     "cosine": models.Distance.COSINE,
@@ -28,10 +30,24 @@ class VectorStore:
     """Thin wrapper around an embedded Qdrant client, one collection per model."""
 
     def __init__(self, path: Path) -> None:
-        """Open (or create) the embedded Qdrant store rooted at ``path``."""
+        """Open (or create) the embedded Qdrant store rooted at ``path``.
+
+        Embedded Qdrant takes an exclusive lock on ``path``; if another process
+        already holds it, raise a clear :class:`VectorStoreBusyError` instead of
+        leaking Qdrant's internal ``RuntimeError``/lock traceback.
+        """
         # Directory is created by Qdrant; ensure the parent exists first.
         path.mkdir(parents=True, exist_ok=True)
-        self._client: QdrantClient = QdrantClient(path=str(path))
+        try:
+            self._client: QdrantClient = QdrantClient(path=str(path))
+        except RuntimeError as exc:
+            # Qdrant's local client raises a bare RuntimeError when the directory
+            # is already locked by another client — turn it into an actionable one.
+            raise VectorStoreBusyError(
+                f"the vector store at {path} is in use by another process "
+                f"(embedded Qdrant allows only one at a time). Close the db-browser "
+                f"or any other running 'rag embed'/chat and try again."
+            ) from exc
 
     def ensure_collection(self, collection: str, *, kind: str, dim: int, distance: str) -> None:
         """Create ``collection`` for a dense or sparse model if it is absent.
