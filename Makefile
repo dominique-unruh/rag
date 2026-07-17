@@ -7,7 +7,7 @@ LIMIT      ?= 100
 MODEL      ?= qwen3-8b
 OLLAMA_URL ?= http://localhost:11434
 
-.PHONY: extract translate embed browse ollama
+.PHONY: extract translate embed browse pipeline ollama
 
 ## Extract up to LIMIT emails: all of the 'private' account, plus 'rwth' INBOX.
 extract:
@@ -25,6 +25,16 @@ embed: ollama
 ## Launch the db-browser web UI.
 browse:
 	$(RAG) maintenance db-browser
+
+## Run the full pipeline. Every stage runs even if an earlier one fails, but
+## the target exits non-zero if any stage failed.
+pipeline:
+	@rc=0; \
+	$(MAKE) extract   || rc=1; \
+	$(MAKE) translate || rc=1; \
+	$(MAKE) embed     || rc=1; \
+	exit $$rc
+
 
 ## Ensure an Ollama server is reachable; start one in the background if not.
 ollama:
