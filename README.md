@@ -1,10 +1,11 @@
 # rag
 
 A local, single-user retrieval-augmented-generation pipeline over personal data
-(email, notes, …). See [`PLAN.md`](PLAN.md) for the full design.
+(email, notes, …). Architecture docs are under [`doc/`](doc/README.md);
+[`PLAN.md`](PLAN.md) tracks the remaining unbuilt work.
 
 The pipeline has four stages: **extract** → **translate** → **embed** → **chat**.
-Only **extraction** (module 1) is implemented so far.
+**Extraction, translation and embedding** are implemented; **chat** is not yet.
 
 ## Install
 

@@ -5,7 +5,9 @@ Guidance for working in this repository.
 ## What this is
 
 A local, single-user **RAG pipeline** over personal data (email, notes, …). The
-full design is in [`PLAN.md`](PLAN.md) — read it before changing architecture.
+architecture of the implemented parts is documented under [`doc/`](doc/) (index:
+[`doc/README.md`](doc/README.md)); [`PLAN.md`](PLAN.md) tracks only the remaining
+unbuilt work (chat, GC/stats, more plugins). Read both before changing architecture.
 
 Pipeline stages: **extract → translate → embed → chat**. **Extraction (module 1),
 translation (module 2) and embedding (module 3) are implemented; chat is not yet.**
