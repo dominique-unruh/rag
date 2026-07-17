@@ -88,14 +88,27 @@ def _chunk_vector(spec: ModelSpec, chunks: list[str], embed: EmbedFn) -> list[ob
     return list(embed(chunks))
 
 
-def _embed_document(
-    doc: DocRecord, spec: ModelSpec, blobs: BlobStore, embed: EmbedFn, chunk_size: int, overlap: int
-) -> list[models.PointStruct]:
-    """Chunk and embed all parts of ``doc``; return the Qdrant points to store."""
-    points: list[models.PointStruct] = []
+def _chunk_document(
+    doc: DocRecord, blobs: BlobStore, chunk_size: int, overlap: int
+) -> list[tuple[PartRecord, list[str]]]:
+    """Return each part of ``doc`` with its (possibly empty) list of text chunks.
+
+    Chunking is cheap and done up front so the caller knows the total chunk count
+    (for progress reporting) before the expensive embed call.
+    """
+    result: list[tuple[PartRecord, list[str]]] = []
     for part in doc.parts:
         text = blobs.get(part.blob_hash).decode("utf-8", errors="replace")
-        chunks = chunk_text(text, chunk_size, overlap)
+        result.append((part, chunk_text(text, chunk_size, overlap)))
+    return result
+
+
+def _embed_chunked(
+    doc: DocRecord, chunked: list[tuple[PartRecord, list[str]]], spec: ModelSpec, embed: EmbedFn
+) -> list[models.PointStruct]:
+    """Embed the pre-chunked parts of ``doc``; return the Qdrant points to store."""
+    points: list[models.PointStruct] = []
+    for part, chunks in chunked:
         if not chunks:
             # Empty part (e.g. an image-only PDF) — no points, but the part is
             # still recorded as embedded so it is not reselected forever.
@@ -156,18 +169,26 @@ def run_embed(
             limit=options.limit,
             force=options.force,
         ):
-            points = _embed_document(doc, spec, blobs, embed, chunk_size, overlap)
+            # Chunk up front (cheap) so we can report the chunk count before the
+            # expensive embed call, and print the start line without a newline.
+            chunked = _chunk_document(doc, blobs, chunk_size, overlap)
+            if options.verbose:
+                n_chunks = sum(len(chunks) for _, chunks in chunked)
+                sub = ", ".join("/".join(p.sub_doc_id) or "(root)" for p in doc.parts)
+                print(
+                    f"embedding {doc.source_type}:{doc.doc_id} (set {doc.set_id}) "
+                    f"-> {n_chunks} chunk(s) [{sub}] into {spec.id}...",
+                    end="",
+                    flush=True,
+                    file=sys.stderr,
+                )
+            points = _embed_chunked(doc, chunked, spec, embed)
             # Replace this document's points in the model's collection, then record.
             vectors.replace_document(spec.collection, doc.source_type, doc.doc_id, points)
             store.record(doc)
             processed += 1
             if options.verbose:
-                sub = ", ".join("/".join(p.sub_doc_id) or "(root)" for p in doc.parts)
-                print(
-                    f"embedded {doc.source_type}:{doc.doc_id} (set {doc.set_id}) "
-                    f"-> {len(points)} chunk(s) [{sub}] into {spec.id}",
-                    file=sys.stderr,
-                )
+                print(" Done.", file=sys.stderr)
         return processed
     finally:
         vectors.close()

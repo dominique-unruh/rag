@@ -14,24 +14,25 @@ from ..errors import RagError
 from ..secrets import Secrets
 from .models import ModelSpec
 
-# HTTP timeout (seconds) for an embedding request. Embedding can be slow for big
-# local models, so this is generous.
-_HTTP_TIMEOUT: float = 300.0
-
-
 class EmbedBackendError(RagError):
     """Raised when an embedding backend request fails."""
 
 
-def _post_json(url: str, payload: dict[str, object], headers: dict[str, str]) -> dict[str, object]:
-    """POST ``payload`` as JSON to ``url`` and return the parsed JSON response."""
+def _post_json(
+    url: str, payload: dict[str, object], headers: dict[str, str], timeout: float
+) -> dict[str, object]:
+    """POST ``payload`` as JSON to ``url`` and return the parsed JSON response.
+
+    ``timeout`` (seconds) bounds one request; it is the model's per-request
+    timeout, applied to a single ``batch_size`` batch (not a whole document).
+    """
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(url, data=data, method="POST")
     request.add_header("Content-Type", "application/json")
     for name, value in headers.items():
         request.add_header(name, value)
     try:
-        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.URLError as exc:
         raise EmbedBackendError(f"embedding request to {url} failed: {exc}") from exc
@@ -54,7 +55,7 @@ def _embed_openai(spec: ModelSpec, texts: list[str], secrets: Secrets) -> list[l
     if spec.api_key_name:
         # Resolve the API key via the shared secrets mechanism (never the YAML).
         headers["Authorization"] = f"Bearer {secrets.get(spec.api_key_name)}"
-    body = _post_json(url, {"model": spec.model, "input": texts}, headers)
+    body = _post_json(url, {"model": spec.model, "input": texts}, headers, spec.timeout)
     items = body.get("data")
     if not isinstance(items, list):
         raise EmbedBackendError(f"unexpected embeddings response from {url}")
@@ -68,7 +69,7 @@ def _embed_ollama(spec: ModelSpec, texts: list[str]) -> list[list[float]]:
     if not spec.host:
         raise EmbedBackendError(f"model {spec.id!r}: 'host' required for backend 'ollama'")
     url = spec.host.rstrip("/") + "/api/embed"
-    body = _post_json(url, {"model": spec.model, "input": texts}, {})
+    body = _post_json(url, {"model": spec.model, "input": texts}, {}, spec.timeout)
     vectors = body.get("embeddings")
     if not isinstance(vectors, list):
         raise EmbedBackendError(f"unexpected embeddings response from {url}")
@@ -82,13 +83,23 @@ def embed_texts(
 
     ``is_query`` applies the model's query instruction (for asymmetric models).
     ``secrets`` supplies API keys when the backend needs one.
+
+    Texts are sent in batches of at most ``spec.batch_size`` so each backend
+    request stays bounded (under ``spec.timeout``, bounded memory) — important for
+    slow CPU embedders where one big request would otherwise blow the timeout.
     """
     if not texts:
         return []
     prepared = _apply_instruction(spec, texts, is_query)
     resolver = secrets if secrets is not None else Secrets(allow_prompt=False)
-    if spec.backend == "openai":
-        return _embed_openai(spec, prepared, resolver)
-    if spec.backend == "ollama":
-        return _embed_ollama(spec, prepared)
-    raise EmbedBackendError(f"model {spec.id!r}: unknown backend {spec.backend!r}")
+    if spec.backend not in ("openai", "ollama"):
+        raise EmbedBackendError(f"model {spec.id!r}: unknown backend {spec.backend!r}")
+    vectors: list[list[float]] = []
+    # One request per batch of up to batch_size texts; concatenate in input order.
+    for start in range(0, len(prepared), spec.batch_size):
+        batch = prepared[start:start + spec.batch_size]
+        if spec.backend == "openai":
+            vectors.extend(_embed_openai(spec, batch, resolver))
+        else:  # ollama
+            vectors.extend(_embed_ollama(spec, batch))
+    return vectors

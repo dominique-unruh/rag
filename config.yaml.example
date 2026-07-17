@@ -41,6 +41,10 @@ embedding:
       model: qwen3-embedding:8b
       dim: 4096
       # query_instruction: "Instruct: retrieve relevant documents\nQuery: "
+      # Per-request batching / timeout (dense backends). Small batches keep each
+      # request under `timeout` on slow CPU embedders; raise batch_size on GPU.
+      # batch_size: 16     # max chunks per request (default 16)
+      # timeout: 300       # seconds per request (default 300)
     # Sparse: local BM25 for exact-term matches (names, IDs, order numbers).
     # No model/service — tokenised locally; Qdrant applies IDF at query time.
     - id: bm25

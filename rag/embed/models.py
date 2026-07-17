@@ -20,6 +20,10 @@ from ..errors import ConfigError
 _DEFAULT_CHUNK_SIZE: int = 1024
 _DEFAULT_CHUNK_OVERLAP: int = 128
 
+# Default per-request batching / timeout for dense backends if the config omits them.
+_DEFAULT_BATCH_SIZE: int = 16
+_DEFAULT_TIMEOUT: float = 300.0
+
 
 @dataclass(frozen=True)
 class ModelSpec:
@@ -57,6 +61,15 @@ class ModelSpec:
 
     query_instruction: str | None = None
     """Optional instruction prefix prepended to *query* texts (not documents)."""
+
+    batch_size: int = _DEFAULT_BATCH_SIZE
+    """Max chunks sent per backend request (dense only). Smaller batches keep each
+    request under ``timeout`` and bound memory; larger batches are more efficient.
+    Raise it once the backend runs on a GPU. Unused for sparse (local) models."""
+
+    timeout: float = _DEFAULT_TIMEOUT
+    """HTTP timeout (seconds) for one backend request. Generous for slow/CPU
+    embedders. Applies per ``batch_size`` request, not per document."""
 
 
 def _collection_name(model_id: str) -> str:
@@ -111,6 +124,15 @@ def _parse_model(entry: Mapping[str, Any]) -> ModelSpec:
         # Sparse vectors have no fixed dimension; dim is unused.
         dim = 0
 
+    # Per-request batching / timeout (dense backends). Validated defensively so a
+    # bad config fails loudly rather than sending a degenerate request.
+    batch_size = int(entry.get("batch_size", _DEFAULT_BATCH_SIZE))
+    if batch_size < 1:
+        raise ConfigError(f"model {model_id!r}: 'batch_size' must be >= 1")
+    timeout = float(entry.get("timeout", _DEFAULT_TIMEOUT))
+    if timeout <= 0:
+        raise ConfigError(f"model {model_id!r}: 'timeout' must be > 0")
+
     return ModelSpec(
         id=str(model_id),
         type=model_type,
@@ -123,6 +145,8 @@ def _parse_model(entry: Mapping[str, Any]) -> ModelSpec:
         host=entry.get("host"),
         api_key_name=entry.get("api_key_name"),
         query_instruction=entry.get("query_instruction"),
+        batch_size=batch_size,
+        timeout=timeout,
     )
 
 
