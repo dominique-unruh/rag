@@ -7,12 +7,18 @@ LIMIT      ?= 100
 MODEL      ?= qwen3-8b
 OLLAMA_URL ?= http://localhost:11434
 
-.PHONY: extract translate embed browse pipeline ollama
+.PHONY: extract extract_full translate embed browse pipeline ollama
 
 ## Extract up to LIMIT emails: all of the 'private' account, plus 'rwth' INBOX.
 extract:
 	$(RAG) --verbose extract email account=private count=$(LIMIT)
 	$(RAG) --verbose extract email account=rwth folder=INBOX count=$(LIMIT)
+
+## Like `extract`, but a full resync (full=true): re-fetch every message,
+## ignoring the stored per-folder UID memory.
+extract_full:
+	$(RAG) --verbose extract email account=private count=$(LIMIT) full=true
+	$(RAG) --verbose extract email account=rwth folder=INBOX count=$(LIMIT) full=true
 
 ## Translate up to LIMIT documents to Markdown.
 translate:
@@ -40,7 +46,7 @@ pipeline:
 ollama:
 	@curl -sf $(OLLAMA_URL)/api/tags >/dev/null 2>&1 || { \
 	  echo "Ollama not reachable at $(OLLAMA_URL); starting 'ollama serve'..."; \
-	  ollama serve >/tmp/ollama-serve.log 2>&1 & \
+	  setsid ollama serve >/tmp/ollama-serve.log 2>&1 </dev/null & \
 	  for i in $$(seq 1 30); do \
 	    curl -sf $(OLLAMA_URL)/api/tags >/dev/null 2>&1 && break; \
 	    sleep 1; \
