@@ -7,10 +7,22 @@ blob bytes, only hashes.
 ## Blob store (filesystem)
 
 - Content-addressed: path derived from the content hash (SHA-256), sharded, e.g.
-  `blobs/ab/cd/abcd…`.
+  `blobs/ab/cd/abcd…`. The hash is over the **uncompressed** content.
 - Immutable: writing the same content twice is a no-op (natural dedup).
 - The DB never stores blob bytes, only the hash.
 - All blob reads are lock-free (files never mutate); deletion is only via GC.
+- **On-disk encoding**: each file is a 1-byte codec marker (`0` = raw, `1` =
+  zstd; 256 slots for future formats) + payload. Writes keep whichever of raw/zstd
+  is smaller, so already-compressed attachments are never grown. Because the
+  address is the *decoded* content hash, compression is a pure storage detail
+  (dedup/immutability unaffected). Measured ~47% on-disk saving on real mail (see
+  [`../PLAN.md`](../PLAN.md)).
+- **Format migration**: a store written by the pre-marker version is upgraded once
+  by `BlobStore.migrate()` (invoked automatically at the start of an
+  extract/translate/embed run, then a cheap no-op via a `.format_version`
+  sentinel). It rewrites legacy raw blobs into the marker format under the
+  single-writer assumption; the read path assumes the marker format and carries no
+  legacy fallback.
 
 ## Metadata database (SQLite)
 

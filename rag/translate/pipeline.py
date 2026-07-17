@@ -110,6 +110,9 @@ def run_translation(
     storage = config.storage_dir
     translator = load_translator(options.translator)
     blobs = BlobStore(storage / _BLOBS_SUBDIR)
+    # One-time upgrade of any pre-marker blobs to the compressed format (no-op once
+    # done). Cheap after the first run; harmless in inspect/dry-run.
+    blobs.migrate()
 
     # Git gating: only a real DB write needs a clean tree + a meaningful revision.
     store_to_db = not (options.dry_run or options.inspect)

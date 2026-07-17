@@ -68,3 +68,18 @@ here.
 12. **Testing strategy. Adopted.** Fixture-based tests per module (fake source dir,
     tmp SQLite, tmp blob dir, fake embedding endpoint), written alongside each module
     rather than after.
+
+13. **Blob compression: per-blob zstd, no packing/dictionary. Resolved.** Measured a
+    real 2200-blob email store (262 MiB): zstd -19 saves **~47% on disk**, while
+    filesystem block-rounding waste was only **1.8%** (blobs average ~122 KiB — the
+    store is byte-heavy, not file-count-heavy). So **packing** small blobs into
+    containers would recover <2% for a lot of complexity (a blob index as a second
+    source of truth, a repack tool, GC interaction) — rejected. A **trained
+    dictionary** only helps small inputs, which are negligible here — rejected. zstd
+    adapts within a single frame but there is no cross-blob online learning; each
+    blob is an independent frame (required anyway for content-addressed random
+    access). *Decision:* 1-byte codec marker (`0` raw / `1` zstd; 256 slots) +
+    `min(raw, zstd)` payload, hash over uncompressed content; a one-time
+    `BlobStore.migrate()` (run at pipeline start, guarded by a `.format_version`
+    sentinel) upgrades legacy raw blobs, so the read path carries no legacy
+    fallback. See [storage-model.md](storage-model.md).

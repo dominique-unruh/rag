@@ -56,6 +56,9 @@ def run_extraction(
 
     # Blob store and per-plugin state directory live under the storage dir.
     blobs = BlobStore(storage_dir / _BLOBS_SUBDIR)
+    # One-time upgrade of any pre-marker blobs to the compressed format (no-op once
+    # done). A pipeline run is a natural, single-writer moment to do this.
+    blobs.migrate()
     state_dir = _state_dir_for(storage_dir, source_type)
     # Default the secret resolver if the caller did not inject one.
     resolver = secrets if secrets is not None else Secrets()

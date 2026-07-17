@@ -172,6 +172,9 @@ def run_embed(
     embed: EmbedFn = embed_fn or (lambda texts: embed_texts(spec, texts, secrets=resolver))
 
     blobs = BlobStore(storage / _BLOBS_SUBDIR)
+    # One-time upgrade of any pre-marker blobs to the compressed format (no-op once
+    # done). A pipeline run is a natural, single-writer moment to do this.
+    blobs.migrate()
     vectors = VectorStore(storage / _QDRANT_SUBDIR)
     owns_db = db is None
     database = db if db is not None else Database.open(storage / _DB_FILENAME)
