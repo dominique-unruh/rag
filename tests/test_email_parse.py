@@ -108,6 +108,13 @@ def test_build_stable_metadata() -> None:
     assert "dave@example.org" in meta["recipients"]
     # Date normalised to canonical UTC ISO 8601 with the Z designator.
     assert meta["date"] == "2026-07-15T09:30:00Z"
+    # The message's own id, bare (no angle brackets), like the doc_id form.
+    assert meta["message-id"] == "abc123@example.org"
+
+
+def test_stable_metadata_message_id_absent() -> None:
+    """No Message-ID header -> the 'message-id' key is omitted."""
+    assert "message-id" not in build_stable_metadata(_parse("From: a@x\r\n\r\nbody"))
 
 
 def test_stable_metadata_date_normalised_to_utc() -> None:

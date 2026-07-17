@@ -134,9 +134,10 @@ def build_stable_metadata(msg: EmailMessage) -> dict[str, Any]:
     ``msg`` must be parsed with ``policy=email.policy.default`` so headers are
     decoded and addresses/dates come back structured. Keys: ``sender``,
     ``recipients`` (To + Cc), the global ``title`` (= the decoded Subject),
-    ``mime-type`` and — only when the Date header parses — ``date`` in the shared
-    canonical format (:func:`rag.timestamps.format_timestamp`). The owning account
-    is deliberately *not* here (it is transient).
+    ``mime-type``, ``message-id`` (the message's own bare id, when present) and —
+    only when the Date header parses — ``date`` in the shared canonical format
+    (:func:`rag.timestamps.format_timestamp`). The owning account is deliberately
+    *not* here (it is transient).
     """
     subject = msg["Subject"]
     meta: dict[str, Any] = {
@@ -147,6 +148,11 @@ def build_stable_metadata(msg: EmailMessage) -> dict[str, Any]:
         "title": str(subject) if subject is not None else "",
         "mime-type": _EMAIL_MIME,
     }
+    # The message's own id (bare, no angle brackets — same form as the doc_id and
+    # the threading headers), when the header is present.
+    own_ids = _message_ids(msg["Message-ID"])
+    if own_ids:
+        meta["message-id"] = own_ids[0]
     # Store the date only if it parsed; normalise to the canonical format so it
     # matches every other extractor. Omit it entirely otherwise.
     moment = _header_datetime(msg)

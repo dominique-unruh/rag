@@ -53,11 +53,13 @@ extractor-specific).
 | `mime-type`   | global  | `message/rfc822`                         | Always the raw RFC 5322 message. |
 | `sender`      | email   | `NAME <EMAIL>` (NAME optional)           | Cleaned `From`. |
 | `recipients`  | email   | comma-separated `NAME <EMAIL>` list      | Cleaned `To` + `Cc`, merged. |
+| `message-id`  | email   | bare message-id                          | The message's own `Message-ID`. Omitted if absent. |
 | `references`  | email   | JSON list of bare message-ids            | The `References` header (thread ancestry). Omitted if absent. |
 | `in-reply-to` | email   | JSON list of bare message-ids            | The `In-Reply-To` header. Omitted if absent. |
 
-Message-ids in `references` / `in-reply-to` are stored **without** angle brackets,
-matching the `doc_id` form (`<message-id>`), so they reference other messages.
+Message-ids in `message-id` / `references` / `in-reply-to` are stored **without**
+angle brackets, matching the `doc_id` form (`<message-id>`); `message-id` normally
+equals the `doc_id`, and the threading keys reference other messages.
 
 The blob is the full raw email (RFC 5322, headers included).
 
