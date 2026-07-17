@@ -164,3 +164,17 @@ class Extractor(ABC):
         exists. Not abstract — a plugin may legitimately have no source URL.
         """
         return None
+
+    def statistics(self, state_dir: Path, config: Mapping[str, Any]) -> dict[str, Any]:
+        """Return cheap, plugin-specific statistics for the ``stats`` maintenance tool.
+
+        Given the plugin's private ``state_dir`` and its config subtree, return a
+        (possibly nested) mapping of stat name -> value describing what the plugin
+        has stored — e.g. how many message UIDs it is tracking per account.
+
+        **Must be cheap**: read only what is already persisted in ``state_dir``;
+        do **no** costly work (no network, no IMAP, no full DB scans). The DB-side
+        counts (documents/translations/embeddings) are gathered centrally by the
+        stats tool, not here. Not abstract — the default is no plugin stats.
+        """
+        return {}

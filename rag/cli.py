@@ -115,6 +115,11 @@ def _build_parser() -> argparse.ArgumentParser:
     delete.add_argument("table", choices=["extract"], help="which table/domain to delete from")
     delete.add_argument("source_type", help="the item's source_type (plugin id)")
     delete.add_argument("doc_id", help="the item's doc_id")
+
+    # stats: count documents/translations/embeddings + per-plugin state stats
+    stats = tools.add_parser("stats", help="count everything in the database")
+    stats.add_argument("--source", dest="source_type", help="restrict counts to one source_type")
+    stats.add_argument("--json", dest="as_json", action="store_true", help="emit JSON instead of text")
     return parser
 
 
@@ -179,6 +184,11 @@ def _cmd_maintenance(args: argparse.Namespace) -> None:
         serve(config, host=args.host, port=args.port, open_browser=not args.no_open)
     elif args.tool == "delete":
         _maintenance_delete(args, config)
+    elif args.tool == "stats":
+        # Imported lazily so the counting code loads only when needed.
+        from .maintenance.stats import run_stats
+
+        run_stats(config, source_type=args.source_type, as_json=args.as_json)
 
 
 def _maintenance_delete(args: argparse.Namespace, config: Config) -> None:

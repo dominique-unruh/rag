@@ -21,8 +21,19 @@ A top-level dispatcher (`rag`) with subcommands (each also runnable as a package
     selected document's full metadata (stable + transient) as a table below, plus a
     content preview and a download button (using the document's mime-type).
   - `delete` — cascading deletion via the store API.
+  - `stats` — count everything in the metadata DB (read-only): documents (total +
+    per `source_type`), translation sets (total/active), documents with no active
+    translation, active sets gone stale (their `source_version` no longer matches
+    the document's `version`), and translation parts (total + in active sets); plus,
+    per embedding model, how many active parts are embedded vs still missing and the
+    raw embedding-row count (flagging models in the DB but absent from config). Each
+    extraction plugin also contributes its own cheap `statistics()` read from its
+    state dir only (no network/IMAP/DB scans). It also reports **on-disk storage
+    use**: the metadata DB (with WAL sidecars), the blob store (actual disk
+    allocation via `du`), the vector store directory, and each plugin's state dir. `--source <type>` restricts to one source; `--json` emits
+    machine-readable output.
 
-The **`chat`** subcommand and GC/stats maintenance tasks are not built yet — see
+The **`chat`** subcommand and GC maintenance tasks are not built yet — see
 [`../PLAN.md`](../PLAN.md).
 
 **Safety principle — prefer failing over corrupting.** Every maintenance/GC

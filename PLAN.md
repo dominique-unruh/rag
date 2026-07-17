@@ -52,14 +52,13 @@ under `extract/plugins/`, `source_type` = directory name):
 
 ## Maintenance — remaining tasks (not built)
 
-The `maintenance` dispatcher exists with `db-browser` and `delete` (see
+The `maintenance` dispatcher exists with `db-browser`, `delete` and `stats` (see
 [`doc/operations.md`](doc/operations.md)). Still to build:
 
 - **GC-like tasks** (filter-driven): remove unreferenced blobs, prune inactive
   translations, drop orphaned embeddings — each under the write lock, aborting on
   uncertainty, with a dry-run/report mode (the safety principle is documented in
   [`doc/operations.md`](doc/operations.md)).
-- **stats**.
 
 ---
 
@@ -81,5 +80,5 @@ The `maintenance` dispatcher exists with `db-browser` and `delete` (see
    embedding indices when present.
 2. **Additional extraction plugins** (see *More extractors* above), now that email
    has proven the design.
-3. **Maintenance**: GC + stats.
+3. **Maintenance**: GC.
 4. Iterate: more filters, context-aware translation, more source types.

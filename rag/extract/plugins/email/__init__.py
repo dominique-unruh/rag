@@ -29,7 +29,7 @@ from ....interrupt import interrupt_requested
 from ....secrets import Secrets
 from ....timestamps import format_timestamp
 from ...base import Extractor, Store
-from .imap import _truthy, extract_account, run_deletions
+from .imap import _SECRETS_SUBDIR, _load_uidmap, _truthy, extract_account, run_deletions
 
 # MIME type recorded for the raw email blobs.
 _EMAIL_MIME: str = "message/rfc822"
@@ -275,3 +275,37 @@ class EmailExtractor(Extractor):
             # A graceful interrupt stops the whole run, not just one account.
             if interrupt_requested():
                 break
+
+    def statistics(self, state_dir: Path, config: Mapping[str, Any]) -> dict[str, Any]:
+        """Report what the email plugin is tracking, from its state dir only.
+
+        Reads the joint UID map (and the ``secrets/`` dir) — no IMAP, no network.
+        Per account: number of folders and tracked UIDs; plus the count of
+        distinct message-ids across all accounts (the dedup'd message total) and
+        how many accounts have a stored OAuth2 refresh token.
+        """
+        # Load the joint uid->message-id map (empty skeleton if never synced).
+        uidmap = _load_uidmap(state_dir)
+        accounts_stats: dict[str, Any] = {}
+        # Collect distinct message-ids across everything for a dedup'd total.
+        all_message_ids: set[str] = set()
+        total_uids = 0
+        for account_id, account_entry in sorted(uidmap.get("accounts", {}).items()):
+            folders = account_entry.get("folders", {})
+            # Sum UID entries and gather message-ids for this account.
+            account_uids = 0
+            for folder_entry in folders.values():
+                uids = folder_entry.get("uids", {})
+                account_uids += len(uids)
+                all_message_ids.update(uids.values())
+            total_uids += account_uids
+            accounts_stats[account_id] = {"folders": len(folders), "tracked_uids": account_uids}
+        # Count accounts with a persisted OAuth2 refresh token (one file each).
+        secrets_dir = state_dir / _SECRETS_SUBDIR
+        oauth_tokens = len(list(secrets_dir.glob("*.json"))) if secrets_dir.is_dir() else 0
+        return {
+            "accounts": accounts_stats,
+            "tracked_uids_total": total_uids,
+            "distinct_message_ids": len(all_message_ids),
+            "oauth_tokens_stored": oauth_tokens,
+        }
