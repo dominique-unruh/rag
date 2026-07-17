@@ -8,6 +8,7 @@ that model's collection, and record the bookkeeping.
 from __future__ import annotations
 
 import sys
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -59,6 +60,22 @@ class EmbedOptions:
 
     verbose: bool = False
     """Print one progress line per embedded document."""
+
+
+def _format_duration(seconds: float) -> str:
+    """Format an elapsed ``seconds`` compactly, e.g. ``45s``, ``5m30s``, ``1h2m3s``.
+
+    Only the non-zero leading units are shown; seconds are always shown (so a
+    sub-minute run reads ``42s`` and a fast one ``0s``).
+    """
+    total = int(round(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes}m{secs}s"
+    if minutes:
+        return f"{minutes}m{secs}s"
+    return f"{secs}s"
 
 
 def _point_id(model_id: str, part_id: int, chunk_index: int) -> str:
@@ -183,13 +200,15 @@ def run_embed(
                     flush=True,
                     file=sys.stderr,
                 )
+            # Time the actual embedding + store so the Done line can report it.
+            started = time.monotonic()
             points = _embed_chunked(doc, chunked, spec, embed)
             # Replace this document's points in the model's collection, then record.
             vectors.replace_document(spec.collection, doc.source_type, doc.doc_id, points)
             store.record(doc)
             processed += 1
             if options.verbose:
-                print(" Done.", file=sys.stderr)
+                print(f" Done ({_format_duration(time.monotonic() - started)}).", file=sys.stderr)
             # Checkpoint: this document's points + bookkeeping are committed here —
             # a safe point to honour a graceful interrupt.
             if interrupt_requested():
