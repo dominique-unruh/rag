@@ -14,6 +14,7 @@ from pathlib import Path
 from .config import Config
 from .errors import RagError
 from .extract.runner import run_extraction
+from .secrets import Secrets
 
 # Default config file path used when ``--config`` is not supplied.
 _DEFAULT_CONFIG: str = "./config.yaml"
@@ -48,6 +49,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-v", "--verbose", action="store_true",
         help="print a line for each extracted item",
+    )
+    # Re-verify stored passwords: before using a keyring secret, ask whether to
+    # keep it, allowing a stale one to be replaced without deleting it by hand.
+    parser.add_argument(
+        "--reauth", action="store_true",
+        help="for each stored secret, ask whether to keep it or enter a new one",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -117,7 +124,9 @@ def _cmd_extract(args: argparse.Namespace) -> None:
     options: dict[str, object] = dict(_parse_kv_options(args.options))
     # Pass the verbose flag through to the plugin as a reserved option.
     options["verbose"] = args.verbose
-    run_extraction(args.source_type, options, config)
+    # Build the secret resolver here so the global --reauth flag takes effect.
+    secrets = Secrets(reauth=args.reauth)
+    run_extraction(args.source_type, options, config, secrets=secrets)
 
 
 def _cmd_translate(args: argparse.Namespace) -> None:
