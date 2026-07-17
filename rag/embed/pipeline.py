@@ -180,6 +180,18 @@ def run_embed(
         # Guard first: refuse if the model's incompatibility-defining config changed.
         store.ensure_fingerprint(model_fingerprint(spec))
         vectors.ensure_collection(spec.collection, kind=spec.type, dim=spec.dim, distance=spec.distance)
+        # Precount how many documents will be embedded so verbose output can show
+        # n/total progress. Only when verbose — it is a wasted query otherwise.
+        total = (
+            store.count_docs(
+                source_type=options.source_type,
+                doc_id=options.doc_id,
+                limit=options.limit,
+                force=options.force,
+            )
+            if options.verbose
+            else 0
+        )
         processed = 0
         for doc in store.select_docs(
             source_type=options.source_type,
@@ -193,7 +205,9 @@ def run_embed(
             if options.verbose:
                 n_chunks = sum(len(chunks) for _, chunks in chunked)
                 sub = ", ".join("/".join(p.sub_doc_id) or "(root)" for p in doc.parts)
+                # processed is the count already done; this doc is the next one.
                 print(
+                    f"[{processed + 1}/{total}] "
                     f"embedding {doc.source_type}:{doc.doc_id} (set {doc.set_id}) "
                     f"-> {n_chunks} chunk(s) [{sub}] into {spec.id}...",
                     end="",

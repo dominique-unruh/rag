@@ -80,6 +80,61 @@ class EmbedStore:
                 f"its embeddings rows to re-embed from scratch."
             )
 
+    def _active_set_filter(
+        self, source_type: str | None, doc_id: str | None
+    ) -> tuple[str, list[object]]:
+        """Build the WHERE clause + params selecting the active sets to consider.
+
+        Shared by :meth:`select_docs` and :meth:`count_docs` so the two never
+        drift apart on which sets they look at. Always restricts to active sets;
+        optionally narrows by ``source_type`` / ``doc_id``.
+        """
+        clauses = ["ts.is_active = 1"]
+        params: list[object] = []
+        if source_type is not None:
+            clauses.append("ts.source_type = ?")
+            params.append(source_type)
+        if doc_id is not None:
+            clauses.append("ts.doc_id = ?")
+            params.append(doc_id)
+        return " AND ".join(clauses), params
+
+    def count_docs(
+        self,
+        *,
+        source_type: str | None = None,
+        doc_id: str | None = None,
+        limit: int | None = None,
+        force: bool = False,
+    ) -> int:
+        """Return how many documents :meth:`select_docs` would yield for the same args.
+
+        Runs the "needs embedding" predicate as a single SQL count (no chunking or
+        blob reads) so a caller can show ``n/total`` progress before the run. Uses
+        the same active-set filter as :meth:`select_docs`; ``force`` counts every
+        active set, otherwise only those with a part not yet embedded for this
+        model against the current set. ``limit`` caps the result to match the run.
+        """
+        where, params = self._active_set_filter(source_type, doc_id)
+        if force:
+            # Force re-embeds every active set, so the count is just those sets.
+            sql = f"SELECT COUNT(*) AS n FROM translation_sets ts WHERE {where}"
+            count_params: list[object] = params
+        else:
+            # A set needs embedding if it has a part with no embeddings row for
+            # this model against that set. Mirror select_docs' per-part predicate.
+            sql = (
+                f"SELECT COUNT(*) AS n FROM translation_sets ts WHERE {where} "
+                f"AND EXISTS (SELECT 1 FROM translation_parts tp WHERE tp.set_id = ts.id "
+                f"AND NOT EXISTS (SELECT 1 FROM embeddings e "
+                f"WHERE e.part_id = tp.id AND e.model = ? AND e.set_id = ts.id))"
+            )
+            # The model param binds the inner embeddings check.
+            count_params = [*params, self._model]
+        count = int(self._conn.execute(sql, count_params).fetchone()["n"])
+        # The run stops at limit, so the reachable total is capped to match.
+        return min(count, limit) if limit is not None else count
+
     def select_docs(
         self,
         *,
@@ -95,15 +150,7 @@ class EmbedStore:
         ``force`` yields every selected document regardless. Filters restrict the
         selection; ``limit`` caps the count.
         """
-        clauses = ["ts.is_active = 1"]
-        params: list[object] = []
-        if source_type is not None:
-            clauses.append("ts.source_type = ?")
-            params.append(source_type)
-        if doc_id is not None:
-            clauses.append("ts.doc_id = ?")
-            params.append(doc_id)
-        where = " AND ".join(clauses)
+        where, params = self._active_set_filter(source_type, doc_id)
         active_sets = self._conn.execute(
             f"SELECT id, source_type, doc_id FROM translation_sets ts "
             f"WHERE {where} ORDER BY ts.source_type, ts.doc_id",
