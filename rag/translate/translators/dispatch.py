@@ -18,8 +18,15 @@ _TEXT_TYPES: frozenset[str] = frozenset(
 )
 
 # Mime types deliberately dropped (no indexable content) — routed to `ignore`,
-# so they are silently skipped rather than warned about. E.g. S/MIME signatures.
-_IGNORE_TYPES: frozenset[str] = frozenset({"application/x-pkcs7-signature"})
+# so they are silently skipped rather than warned about. Cryptographic signature
+# parts: S/MIME (both the `x-` and IANA-registered spellings) and PGP.
+_IGNORE_TYPES: frozenset[str] = frozenset(
+    {
+        "application/x-pkcs7-signature",
+        "application/pkcs7-signature",
+        "application/pgp-signature",
+    }
+)
 
 
 class Dispatch(Translator):
