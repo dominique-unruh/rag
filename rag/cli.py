@@ -14,6 +14,7 @@ from pathlib import Path
 from .config import Config
 from .errors import RagError
 from .extract.runner import run_extraction
+from .interrupt import graceful_interrupts
 from .secrets import Secrets
 
 # Default config file path used when ``--config`` is not supplied.
@@ -217,18 +218,25 @@ def main(argv: list[str] | None = None) -> int:
     else:
         argcomplete.autocomplete(parser)
     args = parser.parse_args(argv)
+    # Subcommand handlers; the long-running pipeline commands run under a graceful
+    # SIGINT handler so a first Ctrl-C stops at the next item, not mid-write.
+    handlers = {
+        "extract": _cmd_extract,
+        "translate": _cmd_translate,
+        "embed": _cmd_embed,
+        "maintenance": _cmd_maintenance,
+    }
+    graceful = {"extract", "translate", "embed"}
+    handler = handlers.get(args.command)
     try:
-        # Dispatch to the selected subcommand handler.
-        if args.command == "extract":
-            _cmd_extract(args)
-        elif args.command == "translate":
-            _cmd_translate(args)
-        elif args.command == "embed":
-            _cmd_embed(args)
-        elif args.command == "maintenance":
-            _cmd_maintenance(args)
-        else:  # pragma: no cover - argparse enforces valid commands
+        if handler is None:  # pragma: no cover - argparse enforces valid commands
             parser.error(f"unknown command {args.command!r}")
+        elif args.command in graceful:
+            # First Ctrl-C requests a checkpointed stop; a second aborts at once.
+            with graceful_interrupts():
+                handler(args)
+        else:
+            handler(args)
     except RagError as exc:
         # Expected, domain-level failure: print a clean message, no traceback.
         print(f"error: {exc}", file=sys.stderr)

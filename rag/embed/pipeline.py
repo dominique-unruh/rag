@@ -17,6 +17,7 @@ from qdrant_client import models
 from ..blobs import BlobStore
 from ..config import Config
 from ..db import Database
+from ..interrupt import interrupt_requested
 from ..secrets import Secrets
 from .backends import embed_texts
 from .chunk import chunk_text
@@ -189,6 +190,11 @@ def run_embed(
             processed += 1
             if options.verbose:
                 print(" Done.", file=sys.stderr)
+            # Checkpoint: this document's points + bookkeeping are committed here —
+            # a safe point to honour a graceful interrupt.
+            if interrupt_requested():
+                print(f"interrupted after {processed} document(s).", file=sys.stderr)
+                break
         return processed
     finally:
         vectors.close()

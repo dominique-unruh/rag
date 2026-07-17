@@ -25,6 +25,7 @@ from typing import Any
 from urllib.parse import quote, quote_plus
 
 from ....errors import ConfigError
+from ....interrupt import interrupt_requested
 from ....secrets import Secrets
 from ....timestamps import format_timestamp
 from ...base import Extractor, Store
@@ -250,3 +251,6 @@ class EmailExtractor(Extractor):
                 options=options,
                 remaining=remaining,
             )
+            # A graceful interrupt stops the whole run, not just one account.
+            if interrupt_requested():
+                break

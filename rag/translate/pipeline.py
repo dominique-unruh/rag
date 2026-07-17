@@ -15,6 +15,7 @@ from ..config import Config
 from ..db import Database
 from ..errors import RagError
 from ..gitinfo import git_revision, is_clean
+from ..interrupt import interrupt_requested
 from .base import Document, Translation
 from .discovery import load_translator
 from .store import SourceDocument, TranslationStore
@@ -166,6 +167,13 @@ def run_translation(
                     parts=[(t.sub_doc_id, t.text, t.stable_metadata) for t in translations],
                 )
             processed += 1
+            # Checkpoint: a document is fully translated and (if storing) committed
+            # here — a safe point to honour a graceful interrupt.
+            if interrupt_requested():
+                print(
+                    f"interrupted after {processed} document(s).", file=sys.stderr
+                )
+                break
         return processed
     finally:
         if owns_db:

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from ....errors import PluginError
+from ....interrupt import interrupt_requested
 from ....secrets import Secrets
 from ....timestamps import parse_timestamp
 from ...base import Store
@@ -437,6 +438,11 @@ def extract_account(
             if remaining is not None and remaining <= 0:
                 # Exhausted the fetch budget for this run.
                 break
+            # Graceful interrupt requested mid-run: stop after the current folder
+            # (its progress is already persisted above).
+            if interrupt_requested():
+                print(f"interrupted; stopping account {account_id!r}.", file=sys.stderr)
+                break
     finally:
         # Always log out cleanly, even on error.
         try:
@@ -523,6 +529,10 @@ def _sync_folder(
     for uid in unknown:
         if remaining is not None and remaining <= 0:
             # Budget exhausted; stop fetching but keep the state gathered so far.
+            break
+        # Checkpoint: honour a graceful interrupt between messages. State gathered
+        # so far is persisted by the caller after this folder returns.
+        if interrupt_requested():
             break
         fetched = _fetch_message(client, uid)
         if fetched is None:
