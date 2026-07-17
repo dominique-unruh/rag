@@ -4,7 +4,6 @@
 
 RAG        := ./rag-cli
 LIMIT      ?= 10
-MODEL      ?= qwen3-8b
 OLLAMA_URL ?= http://localhost:11434
 
 .PHONY: extract extract_full delete translate embed browse pipeline ollama
@@ -39,7 +38,8 @@ translate:
 
 ## Embed up to LIMIT documents into MODEL's index (needs the Ollama server).
 embed: ollama
-	$(RAG) --verbose embed --model $(MODEL) # --limit $(LIMIT)
+	$(RAG) --verbose embed --model bm25 # --limit $(LIMIT)
+	$(RAG) --verbose embed --model qwen3-8b # --limit $(LIMIT)
 
 ## Launch the db-browser web UI.
 browse:

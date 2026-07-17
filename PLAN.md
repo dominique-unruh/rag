@@ -62,6 +62,46 @@ The `maintenance` dispatcher exists with `db-browser`, `delete` and `stats` (see
 
 ---
 
+## Storage — blob compression (not built)
+
+Compress the content-addressed blob store with **zstd**, per blob. Decided by
+measurement (`scripts/estimate_zstd_savings.py`) over a real 2200-blob email
+store (262 MiB): zstd -19 shrinks it **~47% on disk (~126 MiB saved)**.
+
+- **Per-blob zstd, no packing, no dictionary.** Block-rounding waste was only
+  **1.8%** of disk (blobs average ~122 KiB — the store is byte-heavy, not
+  file-count-heavy), so packing many small files into containers would recover
+  <2% for a lot of complexity (a blob index as a second source of truth, a repack
+  tool, GC interaction). The 26% of blobs that fit in one block are a rounding
+  error (~2 MiB total). A trained dictionary only helps small inputs, which are
+  negligible here — skip it.
+- **Identity unchanged.** Hash stays over the **uncompressed** content, so dedup
+  and immutability are untouched; compression is purely a storage detail.
+- **Format:** a 1-byte marker + payload (`0x00` raw, `0x01` zstd frame). `put()`
+  writes `min(raw, zstd)` with the matching marker — attachments (jpeg/pdf/zip in
+  base64) barely compress and must never be force-grown; the 47% average blends
+  very-compressible text with near-incompressible attachments. `get()` reads the
+  marker and decompresses as needed.
+- **Migration:** existing blobs are unmarked raw bytes. Add a `maintenance
+  recompress` pass that rewrites every blob into the marked format under the write
+  lock (fail-don't-corrupt: temp + atomic rename per blob). Prefer an explicit
+  migration over sniffing zstd magic bytes.
+- **Level:** -19 is slow to compress but the store is write-once and zstd
+  decompresses fast regardless; drop toward ~15 only if extraction throughput
+  suffers (negligible ratio loss).
+- **Dependency:** add `zstandard` to `pyproject`.
+
+*Note on adaptive/online dictionaries:* zstd adapts **within a single frame**
+(later bytes reuse earlier ones), but there is **no cross-blob online learning** —
+each blob is an independent frame with no memory of the others. Dictionaries are
+**batch-trained** offline over a sample; you can periodically **re-train** as the
+corpus grows, but that is a full batch step, not incremental, and every blob must
+then record which dictionary id it was compressed with so it can be decompressed.
+That bookkeeping only pays off for the small-file/packing case, which the
+measurement rules out here.
+
+---
+
 ## Open risks
 
 - **Vector-store concurrency [open].** The embedded-Qdrant policy (embed takes an
@@ -80,5 +120,5 @@ The `maintenance` dispatcher exists with `db-browser`, `delete` and `stats` (see
    embedding indices when present.
 2. **Additional extraction plugins** (see *More extractors* above), now that email
    has proven the design.
-3. **Maintenance**: GC.
+3. **Maintenance**: GC; blob zstd compression + `recompress` migration.
 4. Iterate: more filters, context-aware translation, more source types.
