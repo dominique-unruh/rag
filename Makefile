@@ -21,7 +21,7 @@ extract:
 
 ## Like `extract`, but a full resync (full=true): re-fetch every message,
 ## ignoring the stored per-folder UID memory.
-extract_full:
+extract_full: delete
 	$(RAG) --verbose extract email account=private count=$(LIMIT) full=true
 	$(RAG) --verbose extract email account=rwth folder=INBOX count=$(LIMIT) full=true
 	$(RAG) --verbose extract email account=ut folder=INBOX count=$(LIMIT) full=true

@@ -685,7 +685,24 @@ def run_deletions(
 
     Conservative on failure: an unreachable account keeps its prior map entries
     (its documents stay "present"), and an interrupted scan deletes nothing.
+
+    Rejects additive options (``account``/``folder``/``count``/``since``/
+    ``until``/``full``): this pass is standalone and global, so those would be
+    silently ignored — an explicit error is clearer than a surprising no-op.
     """
+    # Fail loudly on flags this mode ignores, rather than quietly dropping them.
+    conflicts = [
+        key for key in ("account", "folder", "count", "since", "until")
+        if options.get(key) not in (None, "")
+    ]
+    if _truthy(options.get("full")):
+        conflicts.append("full")
+    if conflicts:
+        raise PluginError(
+            f"delete=true is a standalone, global deletion pass and ignores "
+            f"additive options ({', '.join(sorted(conflicts))}); remove them. "
+            f"Run additions separately (without delete=true)."
+        )
     verbose = bool(options.get("verbose"))
     uidmap = _load_uidmap(state_dir)
     for account in accounts:
