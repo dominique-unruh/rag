@@ -29,7 +29,7 @@ from ....interrupt import interrupt_requested
 from ....secrets import Secrets
 from ....timestamps import format_timestamp
 from ...base import Extractor, Store
-from .imap import extract_account
+from .imap import _truthy, extract_account, run_deletions
 
 # MIME type recorded for the raw email blobs.
 _EMAIL_MIME: str = "message/rfc822"
@@ -233,8 +233,23 @@ class EmailExtractor(Extractor):
         options (``since``/``until``/``count``/``folder``) are passed through to
         the per-account sync. Delegates the IMAP work to
         :func:`~rag.extract.plugins.email.imap.extract_account`.
+
+        With ``delete=true`` this instead runs the opt-in cross-account deletion
+        pass (:func:`~rag.extract.plugins.email.imap.run_deletions`): it scans
+        **every** account to refresh the joint UID map and removes documents whose
+        message-id survives nowhere. That pass is separate because it is expensive
+        (it connects to all accounts) and inherently global, so it ignores the
+        ``account``/``folder``/``count`` filters.
         """
         accounts = _accounts_from_config(config)
+        # Opt-in deletion pass: expensive + global, handled entirely separately
+        # from the normal additive sync.
+        if _truthy(options.get("delete")):
+            run_deletions(
+                accounts=accounts, store=store, state_dir=state_dir,
+                secrets=secrets, options=options,
+            )
+            return
         # Optional restriction to a single configured account.
         only_account = options.get("account")
         # The count budget is shared across ALL accounts (count=1 means one item

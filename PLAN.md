@@ -386,17 +386,25 @@ Extracts email from one or more IMAP accounts.
   Moving a message between accounts/folders or reading it thus updates the row
   without retriggering translation/embedding.
 
-**State dir**: stores per-folder IMAP sync state (e.g. `UIDVALIDITY` + the set /
-high-water-mark of seen UIDs) so each run cheaply detects **new** messages
-(UIDs above the mark) and **deleted** ones (known UIDs no longer present →
-`store.delete`). On a `UIDVALIDITY` change the folder is resynced from scratch.
+**State dir**: stores a single **joint UID map** (`uidmap.json`) shared by *all*
+accounts — for each account+folder, the `UIDVALIDITY` plus a `uid -> message-id`
+map. A normal run is **additive only**: it fetches messages whose UID is not yet
+in the map and refreshes the map. It never deletes, because a UID vanishing from
+one folder may just be a **move** to another folder/account under the same
+message-id — and identity (`doc_id`) is the message-id, shared across all
+accounts.
 
-**Excluded-folder purge**: at the start of an account run, documents still marked
-(in transient metadata) as living in a now-`exclude_folders` folder are found via
-`store.list_ids(transient=…)` and deleted — no IMAP needed. If any were purged, a
-**full pass** follows: every included folder is resynced from scratch (ignoring
-the stored UID memory), so a message that also lives in an included folder is
-re-added. This keeps the logic inside the plugin (no separate maintenance step).
+**Deletion (`delete=true`)**: an opt-in, expensive pass reconciles removals,
+kept plugin-internal. It refreshes the joint map by scanning **every** account's
+included folders (resolving any unknown UID via a cheap Message-ID-only header
+fetch), then deletes every document whose message-id is a live UID **nowhere**
+across all accounts. Deletion is thus by **global presence** (delete only when
+the last holder is gone), not per-folder — so a move between folders or servers
+never looks like a deletion, and a message duplicated on two servers survives
+until removed from both. This subsumes the old excluded-folder purge: a message
+that lives only in an `exclude_folders` folder is absent from the map and so is
+deleted. Conservative on failure: an unreachable account keeps its prior map
+entries (its documents stay present), and an interrupted scan deletes nothing.
 
 **`run` options**:
 - `since=<timestamp>` — only messages at/after this time.

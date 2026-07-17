@@ -7,25 +7,31 @@ LIMIT      ?= 10
 MODEL      ?= qwen3-8b
 OLLAMA_URL ?= http://localhost:11434
 
-.PHONY: extract extract_full translate embed browse pipeline ollama
+.PHONY: extract extract_full delete translate embed browse pipeline ollama
 
 ## Extract up to LIMIT emails: all of the 'private' account, plus the INBOX of
-## 'rwth', 'ut' and 'qis-office'. The INBOX-only accounts use nodelete=true so a
-## message moved out of INBOX (into an unsynced folder) is not seen as a
-## deletion and purged; 'private' syncs all folders, so its deletions are real.
+## 'rwth', 'ut' and 'qis-office'. Additive only — no deletions here (a message
+## moved out of a synced folder is never mistaken for a deletion). Run `make
+## delete` to reconcile removals.
 extract:
 	$(RAG) --verbose extract email account=private count=$(LIMIT)
-	$(RAG) --verbose extract email account=rwth folder=INBOX count=$(LIMIT) nodelete=true
-	$(RAG) --verbose extract email account=ut folder=INBOX count=$(LIMIT) nodelete=true
-	$(RAG) --verbose extract email account=qis-office folder=INBOX count=$(LIMIT) nodelete=true
+	$(RAG) --verbose extract email account=rwth folder=INBOX count=$(LIMIT)
+	$(RAG) --verbose extract email account=ut folder=INBOX count=$(LIMIT)
+	$(RAG) --verbose extract email account=qis-office folder=INBOX count=$(LIMIT)
 
 ## Like `extract`, but a full resync (full=true): re-fetch every message,
 ## ignoring the stored per-folder UID memory.
 extract_full:
 	$(RAG) --verbose extract email account=private count=$(LIMIT) full=true
-	$(RAG) --verbose extract email account=rwth folder=INBOX count=$(LIMIT) full=true nodelete=true
-	$(RAG) --verbose extract email account=ut folder=INBOX count=$(LIMIT) full=true nodelete=true
-	$(RAG) --verbose extract email account=qis-office folder=INBOX count=$(LIMIT) full=true nodelete=true
+	$(RAG) --verbose extract email account=rwth folder=INBOX count=$(LIMIT) full=true
+	$(RAG) --verbose extract email account=ut folder=INBOX count=$(LIMIT) full=true
+	$(RAG) --verbose extract email account=qis-office folder=INBOX count=$(LIMIT) full=true
+
+## Reconcile deletions (delete=true): scan EVERY account's folders and remove
+## documents whose message-id survives nowhere. Expensive (connects to all
+## accounts, may fetch headers) and global, so it ignores account/folder/count.
+delete:
+	$(RAG) --verbose extract email delete=true
 
 ## Translate up to LIMIT documents to Markdown.
 translate:

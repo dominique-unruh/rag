@@ -147,27 +147,78 @@ def _connect(account: Mapping[str, Any], credential: str) -> imaplib.IMAP4:
     return client
 
 
-def _state_path(state_dir: Path, account_id: str) -> Path:
-    """Return the JSON sync-state file path for ``account_id``."""
-    # Sanitise the id so it is always a safe filename.
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", account_id)
-    return state_dir / f"{safe}.json"
+# Filename of the joint UID map: one file shared by ALL accounts (not one per
+# account). Deletion detection needs to know whether a message-id survives
+# *anywhere* across every account/folder, so the maps are kept together.
+_UIDMAP_FILENAME: str = "uidmap.json"
 
 
-def _load_state(path: Path) -> dict[str, Any]:
-    """Load the sync state from ``path``, returning an empty skeleton if absent."""
-    if not path.exists():
-        # Fresh account: no folders seen yet.
-        return {"folders": {}}
-    return json.loads(path.read_text())
+def _uidmap_path(state_dir: Path) -> Path:
+    """Return the path of the joint UID map file under ``state_dir``."""
+    return state_dir / _UIDMAP_FILENAME
 
 
-def _save_state(path: Path, state: Mapping[str, Any]) -> None:
-    """Persist the sync ``state`` to ``path`` atomically."""
-    # Write to a temp file then rename so a crash cannot corrupt the state file.
+def _load_uidmap(state_dir: Path) -> dict[str, Any]:
+    """Load the joint UID→message-id map for all accounts.
+
+    Shape: ``{"accounts": {<account_id>: {"folders": {<folder>: {"uidvalidity":
+    int, "uids": {<uid>: <doc_id>}}}}}}``. Returns an empty skeleton when the file
+    is absent, first migrating any legacy per-account state files (the previous
+    ``<account_id>.json`` format) so a switch to the joint map does not force a
+    full re-download.
+    """
+    path = _uidmap_path(state_dir)
+    if path.exists():
+        return json.loads(path.read_text())
+    # Migration: fold any legacy per-account files (same per-folder shape) into
+    # the joint structure. Best-effort — an unreadable file is simply skipped.
+    data: dict[str, Any] = {"accounts": {}}
+    for legacy in sorted(state_dir.glob("*.json")):
+        if legacy.name == _UIDMAP_FILENAME:
+            continue
+        try:
+            old = json.loads(legacy.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(old, Mapping) and "folders" in old:
+            # The legacy filename stem is the (sanitised) account id.
+            data["accounts"][legacy.stem] = {"folders": old["folders"]}
+    return data
+
+
+def _save_uidmap(state_dir: Path, data: Mapping[str, Any]) -> None:
+    """Persist the joint UID map atomically (temp file + rename)."""
+    path = _uidmap_path(state_dir)
+    # Write to a temp file then rename so a crash cannot corrupt the map.
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
     tmp.replace(path)
+
+
+def _account_folders(uidmap: dict[str, Any], account_id: str) -> dict[str, Any]:
+    """Return (creating) the per-folder sub-map for ``account_id`` in ``uidmap``."""
+    accounts: dict[str, Any] = uidmap.setdefault("accounts", {})
+    account: dict[str, Any] = accounts.setdefault(account_id, {})
+    return account.setdefault("folders", {})
+
+
+def _open_client(
+    account: Mapping[str, Any], state_dir: Path, secrets: Secrets
+) -> imaplib.IMAP4:
+    """Resolve credentials for ``account`` and return an authenticated client.
+
+    XOAUTH2 accounts (e.g. M365) mint a short-lived OAuth2 access token from the
+    persisted refresh token under the plugin's ``secrets/`` dir; every other
+    account uses a keyring password. Shared by the additions and deletion passes.
+    """
+    mechanism = str(account.get("auth", "login")).lower()
+    if mechanism == "xoauth2":
+        credential = oauth2.access_token(
+            account, state_dir / _SECRETS_SUBDIR, allow_prompt=secrets.allow_prompt
+        )
+    else:
+        credential = _password(secrets, account)
+    return _connect(account, credential)
 
 
 def _parse_folder_name(line: bytes) -> str:
@@ -353,32 +404,29 @@ def _parse_options(options: Mapping[str, Any]) -> tuple[datetime | None, datetim
     return since, until, count
 
 
-def _purge_excluded(
-    store: Store, account: Mapping[str, Any], folder_option: str | None, verbose: bool
-) -> bool:
-    """Delete docs stranded in now-excluded folders; return whether any were purged.
+def _fetch_msgid(client: imaplib.IMAP4, uid: int, validity: int) -> str | None:
+    """Return the doc_id for ``uid`` by fetching only its ``Message-ID`` header.
 
-    Finds documents whose transient (account, folder) still points at a folder in
-    the account's ``exclude_folders`` list and deletes them. Skipped when a single
-    ``folder`` is pinned on the CLI (that is not a full-account reconciliation).
-    Returns True if anything was deleted, signalling the caller to run a full pass.
+    Used by the deletion scan to learn a message's identity cheaply (no body
+    download). Returns the bare Message-ID, or a synthesised
+    ``uidvalidity{v}-uid{u}`` id when the header is absent (matching
+    :func:`_message_id`), or ``None`` if the fetch failed (message vanished
+    mid-scan) so the caller can skip it.
     """
-    # A pinned single-folder run is not the place to reconcile the whole account.
-    if folder_option:
-        return False
-    excluded = sorted({str(f) for f in (account.get("exclude_folders") or [])})
-    if not excluded:
-        return False
-    account_id = str(account["account-id"])
-    # Metadata query: docs of this account currently marked as in an excluded folder.
-    stranded = list(
-        store.list_ids(transient={"account": account_id, "folder": excluded})
-    )
-    for doc_id in stranded:
-        store.delete(doc_id)
-        if verbose:
-            print(f"deleted   {'':>11} [excluded] {doc_id}", file=sys.stderr)
-    return bool(stranded)
+    # BODY.PEEK avoids setting \Seen; fetch just the Message-ID header field.
+    typ, data = client.uid("FETCH", str(uid), "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+    if typ != "OK" or not data or not isinstance(data[0], tuple):
+        return None
+    raw = data[0][1]
+    if not isinstance(raw, (bytes, bytearray)):
+        return None
+    # Parse the tiny header block; reuse the same id derivation as full messages.
+    parsed = email.message_from_bytes(bytes(raw), policy=email.policy.default)
+    header = parsed["Message-ID"]
+    if header is not None:
+        return str(header).strip().strip("<>").strip()
+    # No Message-ID: same UID-based fallback as _message_id (stable per epoch).
+    return f"uidvalidity{validity}-uid{uid}"
 
 
 def extract_account(
@@ -390,53 +438,31 @@ def extract_account(
     options: Mapping[str, Any],
     remaining: int | None,
 ) -> int | None:
-    """Connect to one IMAP account and reconcile its folders into ``store``.
+    """Connect to one IMAP account and add new messages into ``store``.
 
-    For each folder: detects deletions (known UIDs no longer on the server), then
-    fetches only new (previously-unseen) messages, bounded by the shared
-    ``remaining`` fetch budget (``None`` = unlimited). Returns the leftover budget
-    so it can be threaded across accounts. Sync state is persisted so subsequent
-    runs stay incremental and never re-process an unchanged message.
+    **Additions only.** For each folder, fetches previously-unseen messages
+    (bounded by the shared ``remaining`` fetch budget; ``None`` = unlimited),
+    upserts them, and refreshes the account's entries in the joint UID map.
+    Returns the leftover budget so it can be threaded across accounts.
 
-    Before syncing, documents that still carry a now-excluded folder in their
-    transient metadata are purged (via a metadata query, not IMAP); if any were
-    found, a **full pass** is run — every folder resynced from scratch, ignoring
-    the stored UID memory — so messages that also live in an included folder are
-    re-added.
+    Deletions are deliberately *not* handled here: a message-id may live in
+    several folders/accounts, so deciding it is truly gone requires scanning
+    every account at once. That is the opt-in :func:`run_deletions` pass.
     """
     account_id = str(account["account-id"])
     # count is applied globally by the caller; only since/until come from here.
     since, until, _ = _parse_options(options)
     folder_option = str(options["folder"]) if options.get("folder") else None
-    # Verbose: print a one-liner per extracted/deleted message.
+    # Verbose: print a one-liner per extracted message.
     verbose = bool(options.get("verbose"))
-    # nodelete: never remove documents this run — skip both the vanished-UID
-    # deletion pass and the excluded-folder purge. Additive/refresh only. Useful
-    # when syncing a single folder (e.g. INBOX) so messages living only in other,
-    # unsynced folders are not mistaken for deletions and purged.
-    nodelete = _truthy(options.get("nodelete"))
+    # full: ignore the stored UID memory and re-fetch every message in scope.
+    full = _truthy(options.get("full"))
 
-    # Resolve credentials and connect. XOAUTH2 accounts (e.g. M365) use a
-    # short-lived OAuth2 access token, minted from a persisted refresh token
-    # under the plugin's secrets/ dir; everything else uses a keyring password.
-    mechanism = str(account.get("auth", "login")).lower()
-    if mechanism == "xoauth2":
-        credential = oauth2.access_token(
-            account, state_dir / _SECRETS_SUBDIR, allow_prompt=secrets.allow_prompt
-        )
-    else:
-        credential = _password(secrets, account)
-    client = _connect(account, credential)
+    client = _open_client(account, state_dir, secrets)
     try:
-        state_path = _state_path(state_dir, account_id)
-        state = _load_state(state_path)
-        # Purge docs stranded in now-excluded folders. If any were purged, force a
-        # full resync so any that also live in an included folder come back. The
-        # `full` run option forces a full resync unconditionally. Under `nodelete`
-        # the purge is skipped entirely (no deletions this run).
-        full_pass = False if nodelete else _purge_excluded(store, account, folder_option, verbose)
-        if _truthy(options.get("full")):
-            full_pass = True
+        # The joint UID map holds every account; grab this account's sub-map.
+        uidmap = _load_uidmap(state_dir)
+        folders_state = _account_folders(uidmap, account_id)
         for folder in _list_folders(client, account, folder_option):
             # Read-only select: we never modify the mailbox.
             typ, dat = client.select(_quote(folder), readonly=True)
@@ -446,26 +472,23 @@ def extract_account(
                 detail = dat[0].decode(errors="replace") if dat and dat[0] else typ
                 print(f"warning: cannot select folder {folder!r}: {detail}", file=sys.stderr)
                 continue
-            # Read UIDVALIDITY + message count from the SELECT response (never STATUS).
+            # Read UIDVALIDITY from the SELECT response (never STATUS).
             validity = _uidvalidity(client)
-            exists = _exists_count(client)
             remaining = _sync_folder(
                 client=client,
                 store=store,
-                state=state,
+                folders_state=folders_state,
                 account_id=account_id,
                 folder=folder,
                 validity=validity,
-                exists=exists,
                 since=since,
                 until=until,
                 remaining=remaining,
-                full_pass=full_pass,
-                nodelete=nodelete,
+                full=full,
                 verbose=verbose,
             )
             # Persist after each folder so partial progress survives a crash.
-            _save_state(state_path, state)
+            _save_uidmap(state_dir, uidmap)
             if remaining is not None and remaining <= 0:
                 # Exhausted the fetch budget for this run.
                 break
@@ -489,76 +512,44 @@ def _sync_folder(
     *,
     client: imaplib.IMAP4,
     store: Store,
-    state: dict[str, Any],
+    folders_state: dict[str, Any],
     account_id: str,
     folder: str,
     validity: int,
-    exists: int,
     since: datetime | None,
     until: datetime | None,
     remaining: int | None,
-    full_pass: bool = False,
-    nodelete: bool = False,
+    full: bool = False,
     verbose: bool = False,
 ) -> int | None:
-    """Reconcile a single ``folder``; return the updated fetch ``remaining`` budget.
+    """Add previously-unseen messages in ``folder``; return the updated budget.
 
-    Handles UIDVALIDITY changes (resync), deletion detection and bounded fetching
-    of new (previously-unseen) messages only, updating ``state`` in place. When
-    ``full_pass``, the stored UID memory is ignored and every message is
-    re-fetched (used after an excluded-folder purge). When ``nodelete``, the
-    deletion pass is skipped: vanished UIDs are left in the store (and kept in the
-    UID memory), so the run only adds/refreshes. When ``verbose``, prints a
-    one-liner per deleted and per extracted message.
+    Fetches only UIDs not already in the joint map (or every UID when ``full``),
+    upserts each and records its ``uid -> doc_id`` in ``folders_state`` in place.
+    **Never deletes** — a vanished UID may just be a move, so removal is left to
+    the cross-account :func:`run_deletions` pass. When ``verbose``, prints a
+    one-liner per extracted message.
     """
     from . import build_stable_metadata, build_transient_metadata  # avoid import cycle
 
-    folders_state: dict[str, Any] = state.setdefault("folders", {})
     prior = folders_state.get(folder)
     # known maps str(uid) -> doc_id for messages we have already extracted.
-    # A full pass deliberately ignores the stored UID memory and re-fetches all.
-    if not full_pass and prior is not None and int(prior.get("uidvalidity", 0)) == validity:
+    # ``full`` deliberately ignores the stored UID memory and re-fetches all.
+    if not full and prior is not None and int(prior.get("uidvalidity", 0)) == validity:
         known: dict[str, str] = dict(prior.get("uids", {}))
-        validity_matched = True
     else:
-        # Full pass, new folder, or reset UID space: discard the stale UID map and
-        # re-fetch. Do not delete docs — the message-id-based doc_ids stay valid.
+        # Full pass, new folder, or reset UID space: discard the stale UID map.
         known = {}
-        validity_matched = False
-
-    # All current UIDs, used for deletion detection.
-    all_uids = set(_search_uids(client))
-    # Safety: if the folder is non-empty but the search returned nothing, treat it
-    # as a glitch and skip deletion (deletions cascade — never purge on a bad read).
-    search_trustworthy = bool(all_uids) or exists == 0
-    # nodelete suppresses the deletion pass entirely: vanished UIDs stay both in
-    # the store and in the UID memory (so they are never re-fetched or purged).
-    if validity_matched and search_trustworthy and not nodelete:
-        # Any previously-known UID missing from the server was deleted upstream.
-        # Each deletion consumes one unit of the shared budget, like an upsert.
-        for uid_str, doc_id in list(known.items()):
-            if remaining is not None and remaining <= 0:
-                # Budget exhausted; remaining deletions handled on the next run.
-                break
-            if int(uid_str) not in all_uids:
-                store.delete(doc_id)
-                del known[uid_str]
-                if verbose:
-                    # Say what we just did — deleted a vanished message.
-                    print(f"deleted   {'':>11} [{folder}] {doc_id}")
-                if remaining is not None:
-                    remaining -= 1
 
     # Candidate UIDs, filtered by the date window. Only fetch UIDs we have not
     # seen before: an already-known message is not re-processed when nothing
-    # changed IMAP-side. (New mail = new UID; a move/delete is handled via the
-    # deletion pass + a new UID in the destination folder.)
+    # changed IMAP-side. (New mail = new UID; deletions are handled separately.)
     candidates = _search_uids(client, since=since, until=until)
     unknown = [u for u in candidates if str(u) not in known]
     if verbose:
         # Per-folder summary so an empty run is explainable.
         print(
-            f"[{folder}] {len(all_uids)} on server, {len(known)} known, "
+            f"[{folder}] {len(candidates)} in window, {len(known)} known, "
             f"{len(unknown)} new",
             file=sys.stderr,
         )
@@ -607,3 +598,136 @@ def _sync_folder(
     # Record the up-to-date sync state for this folder.
     folders_state[folder] = {"uidvalidity": validity, "uids": known}
     return remaining
+
+
+def _scan_account_uids(
+    client: imaplib.IMAP4,
+    account: Mapping[str, Any],
+    folders_state: dict[str, Any],
+    verbose: bool,
+) -> bool:
+    """Refresh ``folders_state`` from the server for one account's included folders.
+
+    For every included folder, rebuilds ``uid -> doc_id`` from the server's live
+    UID set, reusing message-ids already in the map and fetching just the
+    ``Message-ID`` header for unknown UIDs. Returns ``False`` if a graceful
+    interrupt was requested (the caller must then abort without deleting, since
+    the scan is incomplete); ``True`` when the account was fully scanned.
+
+    Safety: a folder that reports messages (EXISTS > 0) but returns an empty
+    search is treated as a glitch — its prior entries are kept rather than being
+    wiped, so a bad read can never make a message look deleted.
+    """
+    account_id = str(account["account-id"])
+    # None => all included folders (honours configured `folders`/`exclude_folders`);
+    # the deletion scan is global and ignores any single-folder CLI pin.
+    for folder in _list_folders(client, account, None):
+        typ, dat = client.select(_quote(folder), readonly=True)
+        if typ != "OK":
+            detail = dat[0].decode(errors="replace") if dat and dat[0] else typ
+            print(f"warning: cannot select folder {folder!r}: {detail}", file=sys.stderr)
+            continue
+        validity = _uidvalidity(client)
+        exists = _exists_count(client)
+        all_uids = _search_uids(client)
+        # Glitch guard: non-empty folder yet empty search -> keep prior entries.
+        if not all_uids and exists != 0:
+            print(
+                f"warning: empty search on non-empty folder {folder!r} in "
+                f"{account_id!r}; keeping its prior UID map",
+                file=sys.stderr,
+            )
+            continue
+        # Reuse message-ids we already know for this epoch; only unknowns cost a fetch.
+        prior = folders_state.get(folder)
+        prior_uids: dict[str, str] = (
+            dict(prior.get("uids", {}))
+            if prior is not None and int(prior.get("uidvalidity", 0)) == validity
+            else {}
+        )
+        fresh: dict[str, str] = {}
+        for uid in all_uids:
+            # Between folders is a safe checkpoint; abort mid-folder without
+            # committing partial results (prior entry stays intact).
+            if interrupt_requested():
+                return False
+            key = str(uid)
+            doc_id = prior_uids.get(key)
+            if doc_id is None:
+                # Unknown UID: resolve its identity via a cheap header-only fetch.
+                doc_id = _fetch_msgid(client, uid, validity)
+                if doc_id is None:
+                    # Fetch failed (vanished mid-scan) — leave it out of presence.
+                    continue
+            fresh[key] = doc_id
+        folders_state[folder] = {"uidvalidity": validity, "uids": fresh}
+        if verbose:
+            print(f"[{account_id}/{folder}] scanned {len(fresh)} message(s)", file=sys.stderr)
+    return True
+
+
+def run_deletions(
+    *,
+    accounts: list[Mapping[str, Any]],
+    store: Store,
+    state_dir: Path,
+    secrets: Secrets,
+    options: Mapping[str, Any],
+) -> None:
+    """Delete documents whose message-id no longer lives in **any** account.
+
+    The opt-in, expensive counterpart to :func:`extract_account` (triggered by
+    ``delete=true``). It refreshes the joint UID map by scanning every account's
+    included folders — ignoring any ``account``/``folder`` filter, since presence
+    is a global question — then deletes every stored document whose id is not a
+    live message-id anywhere. This subsumes the old excluded-folder purge: a
+    message only in an excluded folder is not in the map, so it is deleted.
+
+    Conservative on failure: an unreachable account keeps its prior map entries
+    (its documents stay "present"), and an interrupted scan deletes nothing.
+    """
+    verbose = bool(options.get("verbose"))
+    uidmap = _load_uidmap(state_dir)
+    for account in accounts:
+        account_id = str(account["account-id"])
+        try:
+            client = _open_client(account, state_dir, secrets)
+        except (PluginError, OSError, imaplib.IMAP4.error) as exc:
+            # Cannot reach this account: keep its stored entries (its documents
+            # stay present and are not deleted this run) and move on.
+            print(
+                f"warning: skipping account {account_id!r} in deletion scan "
+                f"(cannot connect): {exc}",
+                file=sys.stderr,
+            )
+            continue
+        try:
+            folders_state = _account_folders(uidmap, account_id)
+            completed = _scan_account_uids(client, account, folders_state, verbose)
+            # Persist the refreshed map after each account (progress survives a crash).
+            _save_uidmap(state_dir, uidmap)
+        finally:
+            try:
+                client.logout()
+            except OSError:
+                pass
+        if not completed or interrupt_requested():
+            # Incomplete scan -> presence is unreliable -> never delete on it.
+            print("interrupted; deletion scan incomplete, deleting nothing.", file=sys.stderr)
+            return
+
+    # Presence = every message-id currently mapped across all accounts/folders.
+    present: set[str] = set()
+    for account_entry in uidmap.get("accounts", {}).values():
+        for folder_entry in account_entry.get("folders", {}).values():
+            present.update(folder_entry.get("uids", {}).values())
+
+    # Delete any stored document whose id survives in no folder of any account.
+    deleted = 0
+    for doc_id in list(store.list_ids()):
+        if doc_id not in present:
+            store.delete(doc_id)
+            deleted += 1
+            if verbose:
+                print(f"deleted   [gone] {doc_id}", file=sys.stderr)
+    print(f"deletion scan complete: removed {deleted} document(s).", file=sys.stderr)
