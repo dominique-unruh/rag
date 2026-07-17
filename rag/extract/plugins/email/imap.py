@@ -25,6 +25,11 @@ from ....interrupt import interrupt_requested
 from ....secrets import Secrets
 from ....timestamps import parse_timestamp
 from ...base import Store
+from . import oauth2
+
+# Subdirectory (under the plugin's state_dir) holding persistent OAuth2 refresh
+# tokens, one JSON file per account. Owner-only; never committed.
+_SECRETS_SUBDIR: str = "secrets"
 
 # Default IMAP ports for the SSL and plaintext transports.
 _DEFAULT_SSL_PORT: int = 993
@@ -71,32 +76,42 @@ def _password(secrets: Secrets, account: Mapping[str, Any]) -> str:
     )
 
 
-def _authenticate(client: imaplib.IMAP4, mechanism: str, username: str, password: str) -> None:
+def _authenticate(client: imaplib.IMAP4, mechanism: str, username: str, credential: str) -> None:
     """Authenticate ``client`` using the configured ``mechanism``.
 
     ``login`` uses the IMAP ``LOGIN`` command (the imaplib default). ``plain`` uses
     SASL ``AUTHENTICATE PLAIN`` — needed by servers (e.g. RWTH) that reject the
-    ``LOGIN`` command outright but accept the PLAIN mechanism over TLS.
+    ``LOGIN`` command outright but accept the PLAIN mechanism over TLS. ``xoauth2``
+    uses SASL ``XOAUTH2`` with an OAuth2 bearer token as the ``credential`` —
+    required by servers (e.g. Microsoft 365) that no longer accept passwords.
     """
     if mechanism == "login":
-        client.login(username, password)
+        client.login(username, credential)
     elif mechanism == "plain":
         # SASL PLAIN response is "\0<authcid>\0<passwd>"; imaplib base64-encodes
         # whatever the callback returns. authzid is left empty (same as authcid).
-        credentials = f"\0{username}\0{password}".encode("utf-8")
+        credentials = f"\0{username}\0{credential}".encode("utf-8")
         client.authenticate("PLAIN", lambda _challenge: credentials)
+    elif mechanism == "xoauth2":
+        # SASL XOAUTH2 response is "user=<user>^Aauth=Bearer <token>^A^A" (^A =
+        # 0x01); imaplib base64-encodes whatever the callback returns. Here the
+        # ``credential`` is a short-lived OAuth2 access token, not a password.
+        response = f"user={username}\x01auth=Bearer {credential}\x01\x01".encode("utf-8")
+        client.authenticate("XOAUTH2", lambda _challenge: response)
     else:
         raise PluginError(
-            f"unknown IMAP auth mechanism {mechanism!r}; use 'login' or 'plain'"
+            f"unknown IMAP auth mechanism {mechanism!r}; use 'login', 'plain' or 'xoauth2'"
         )
 
 
-def _connect(account: Mapping[str, Any], password: str) -> imaplib.IMAP4:
+def _connect(account: Mapping[str, Any], credential: str) -> imaplib.IMAP4:
     """Open and authenticate an IMAP connection for ``account``.
 
     Uses SSL unless the account sets ``ssl: false``; picks a sensible default port
     for the chosen transport when none is configured. The ``auth`` option selects
-    the authentication mechanism (``login`` default, or ``plain`` for SASL PLAIN).
+    the authentication mechanism (``login`` default, ``plain`` for SASL PLAIN, or
+    ``xoauth2`` for an OAuth2 bearer token). ``credential`` is the password for
+    ``login``/``plain`` and the OAuth2 access token for ``xoauth2``.
     """
     host = str(account["host"])
     use_ssl = bool(account.get("ssl", True))
@@ -115,7 +130,7 @@ def _connect(account: Mapping[str, Any], password: str) -> imaplib.IMAP4:
     )
     account_id = str(account["account-id"])
     try:
-        _authenticate(client, mechanism, username, password)
+        _authenticate(client, mechanism, username, credential)
     except imaplib.IMAP4.error as exc:
         # Turn imaplib's opaque auth failure into a clear, actionable message.
         # A "BAD" reply means the server rejected the auth command itself (some
@@ -126,7 +141,8 @@ def _connect(account: Mapping[str, Any], password: str) -> imaplib.IMAP4:
             f"IMAP authentication failed for account {account_id!r} "
             f"({username} at {host}:{port}, auth={mechanism}): {exc}. "
             f"Check the username/password, or try a different 'auth' mechanism "
-            f"('login' or 'plain') — some servers reject 'login' but accept 'plain'."
+            f"('login', 'plain' or 'xoauth2') — some servers reject 'login' but "
+            f"accept 'plain', and M365 requires 'xoauth2'."
         ) from exc
     return client
 
@@ -394,17 +410,31 @@ def extract_account(
     folder_option = str(options["folder"]) if options.get("folder") else None
     # Verbose: print a one-liner per extracted/deleted message.
     verbose = bool(options.get("verbose"))
+    # nodelete: never remove documents this run — skip both the vanished-UID
+    # deletion pass and the excluded-folder purge. Additive/refresh only. Useful
+    # when syncing a single folder (e.g. INBOX) so messages living only in other,
+    # unsynced folders are not mistaken for deletions and purged.
+    nodelete = _truthy(options.get("nodelete"))
 
-    # Resolve credentials and connect.
-    password = _password(secrets, account)
-    client = _connect(account, password)
+    # Resolve credentials and connect. XOAUTH2 accounts (e.g. M365) use a
+    # short-lived OAuth2 access token, minted from a persisted refresh token
+    # under the plugin's secrets/ dir; everything else uses a keyring password.
+    mechanism = str(account.get("auth", "login")).lower()
+    if mechanism == "xoauth2":
+        credential = oauth2.access_token(
+            account, state_dir / _SECRETS_SUBDIR, allow_prompt=secrets.allow_prompt
+        )
+    else:
+        credential = _password(secrets, account)
+    client = _connect(account, credential)
     try:
         state_path = _state_path(state_dir, account_id)
         state = _load_state(state_path)
         # Purge docs stranded in now-excluded folders. If any were purged, force a
         # full resync so any that also live in an included folder come back. The
-        # `full` run option forces a full resync unconditionally.
-        full_pass = _purge_excluded(store, account, folder_option, verbose)
+        # `full` run option forces a full resync unconditionally. Under `nodelete`
+        # the purge is skipped entirely (no deletions this run).
+        full_pass = False if nodelete else _purge_excluded(store, account, folder_option, verbose)
         if _truthy(options.get("full")):
             full_pass = True
         for folder in _list_folders(client, account, folder_option):
@@ -431,6 +461,7 @@ def extract_account(
                 until=until,
                 remaining=remaining,
                 full_pass=full_pass,
+                nodelete=nodelete,
                 verbose=verbose,
             )
             # Persist after each folder so partial progress survives a crash.
@@ -467,6 +498,7 @@ def _sync_folder(
     until: datetime | None,
     remaining: int | None,
     full_pass: bool = False,
+    nodelete: bool = False,
     verbose: bool = False,
 ) -> int | None:
     """Reconcile a single ``folder``; return the updated fetch ``remaining`` budget.
@@ -474,7 +506,9 @@ def _sync_folder(
     Handles UIDVALIDITY changes (resync), deletion detection and bounded fetching
     of new (previously-unseen) messages only, updating ``state`` in place. When
     ``full_pass``, the stored UID memory is ignored and every message is
-    re-fetched (used after an excluded-folder purge). When ``verbose``, prints a
+    re-fetched (used after an excluded-folder purge). When ``nodelete``, the
+    deletion pass is skipped: vanished UIDs are left in the store (and kept in the
+    UID memory), so the run only adds/refreshes. When ``verbose``, prints a
     one-liner per deleted and per extracted message.
     """
     from . import build_stable_metadata, build_transient_metadata  # avoid import cycle
@@ -497,7 +531,9 @@ def _sync_folder(
     # Safety: if the folder is non-empty but the search returned nothing, treat it
     # as a glitch and skip deletion (deletions cascade — never purge on a bad read).
     search_trustworthy = bool(all_uids) or exists == 0
-    if validity_matched and search_trustworthy:
+    # nodelete suppresses the deletion pass entirely: vanished UIDs stay both in
+    # the store and in the UID memory (so they are never re-fetched or purged).
+    if validity_matched and search_trustworthy and not nodelete:
         # Any previously-known UID missing from the server was deleted upstream.
         # Each deletion consumes one unit of the shared budget, like an upsert.
         for uid_str, doc_id in list(known.items()):

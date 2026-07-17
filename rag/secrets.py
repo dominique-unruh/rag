@@ -48,6 +48,16 @@ class Secrets:
         # Re-verify stored secrets interactively (only meaningful when prompting).
         self._reauth: bool = reauth
 
+    @property
+    def allow_prompt(self) -> bool:
+        """Whether an interactive prompt/login may be used as a last resort.
+
+        Exposed so callers that run their own interactive auth (e.g. the email
+        plugin's OAuth2 device-code login) can honour the same TTY/headless
+        policy as :meth:`get`, and fail cleanly instead of blocking in batch runs.
+        """
+        return self._allow_prompt
+
     def _reauth_prompt(self, key: str, prompt_text: str | None) -> str | None:
         """Ask whether to keep the stored secret for ``key``; replace it if not.
 

@@ -52,7 +52,8 @@ def graceful_interrupts() -> Iterator[None]:
         # First press: note the request; loops stop at their next checkpoint.
         _interrupt_requested = True
         print(
-            "Interrupt requested; stopping after the current item "
+            # Leading newline so the message clears the echoed "^C" on the line.
+            "\nInterrupt requested; stopping after the current item "
             "(press Ctrl-C again to abort immediately).",
             file=sys.stderr,
             flush=True,

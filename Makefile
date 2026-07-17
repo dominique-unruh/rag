@@ -3,22 +3,29 @@
 #        make embed MODEL=bm25    # embed a different model
 
 RAG        := ./rag-cli
-LIMIT      ?= 100
+LIMIT      ?= 10
 MODEL      ?= qwen3-8b
 OLLAMA_URL ?= http://localhost:11434
 
 .PHONY: extract extract_full translate embed browse pipeline ollama
 
-## Extract up to LIMIT emails: all of the 'private' account, plus 'rwth' INBOX.
+## Extract up to LIMIT emails: all of the 'private' account, plus the INBOX of
+## 'rwth', 'ut' and 'qis-office'. The INBOX-only accounts use nodelete=true so a
+## message moved out of INBOX (into an unsynced folder) is not seen as a
+## deletion and purged; 'private' syncs all folders, so its deletions are real.
 extract:
 	$(RAG) --verbose extract email account=private count=$(LIMIT)
-	$(RAG) --verbose extract email account=rwth folder=INBOX count=$(LIMIT)
+	$(RAG) --verbose extract email account=rwth folder=INBOX count=$(LIMIT) nodelete=true
+	$(RAG) --verbose extract email account=ut folder=INBOX count=$(LIMIT) nodelete=true
+	$(RAG) --verbose extract email account=qis-office folder=INBOX count=$(LIMIT) nodelete=true
 
 ## Like `extract`, but a full resync (full=true): re-fetch every message,
 ## ignoring the stored per-folder UID memory.
 extract_full:
 	$(RAG) --verbose extract email account=private count=$(LIMIT) full=true
-	$(RAG) --verbose extract email account=rwth folder=INBOX count=$(LIMIT) full=true
+	$(RAG) --verbose extract email account=rwth folder=INBOX count=$(LIMIT) full=true nodelete=true
+	$(RAG) --verbose extract email account=ut folder=INBOX count=$(LIMIT) full=true nodelete=true
+	$(RAG) --verbose extract email account=qis-office folder=INBOX count=$(LIMIT) full=true nodelete=true
 
 ## Translate up to LIMIT documents to Markdown.
 translate:
@@ -26,7 +33,7 @@ translate:
 
 ## Embed up to LIMIT documents into MODEL's index (needs the Ollama server).
 embed: ollama
-	$(RAG) --verbose embed --model $(MODEL) --limit $(LIMIT)
+	$(RAG) --verbose embed --model $(MODEL) # --limit $(LIMIT)
 
 ## Launch the db-browser web UI.
 browse:
