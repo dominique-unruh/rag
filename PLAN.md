@@ -37,6 +37,19 @@ The `chat` CLI subcommand is likewise not built yet.
 
 ---
 
+## More extractors (not built)
+
+New source plugins to add once email has proven the design (each a subdirectory
+under `extract/plugins/`, `source_type` = directory name):
+
+- **Zulip** — messages/streams from a Zulip account.
+- **Other chat accounts** — further chat platforms (Signal, Messenger, WhatsApp, Telegram, …).
+- **Notes (in Obsidian)**.
+- **RWTH Intranet** — in particular regulations, *Rundschreiben*, and similar
+  official documents.
+
+---
+
 ## Maintenance — remaining tasks (not built)
 
 The `maintenance` dispatcher exists with `db-browser` and `delete` (see
@@ -66,7 +79,7 @@ The `maintenance` dispatcher exists with `db-browser` and `delete` (see
 
 1. **Module 4 (chat)**: simple mode first, then complex mode; fuse multiple
    embedding indices when present.
-2. **Additional extraction plugins** (notes, chats, …), now that email has proven
-   the design.
+2. **Additional extraction plugins** (see *More extractors* above), now that email
+   has proven the design.
 3. **Maintenance**: GC + stats.
 4. Iterate: more filters, context-aware translation, more source types.
