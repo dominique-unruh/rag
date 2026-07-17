@@ -88,6 +88,13 @@ def test_dispatch_unknown_mime_yields_nothing() -> None:
     assert dispatch.translate(doc) == []
 
 
+def test_dispatch_ignored_mime_yields_nothing() -> None:
+    """A deliberately-ignored mime (e.g. S/MIME signature) is routed to `ignore`."""
+    doc = Document("d", [], b"\x00\x01", {"mime-type": "application/x-pkcs7-signature"}, {})
+    assert dispatch.translate(doc) == []
+    assert load_translator("ignore").translate(doc) == []
+
+
 # --- discovery -----------------------------------------------------------
 def test_discovery() -> None:
     """Built-in translators are discoverable; unknown names raise."""

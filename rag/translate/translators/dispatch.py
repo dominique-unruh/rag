@@ -17,6 +17,10 @@ _TEXT_TYPES: frozenset[str] = frozenset(
     {"text/plain", "text/markdown", "text/html", "application/xhtml+xml"}
 )
 
+# Mime types deliberately dropped (no indexable content) — routed to `ignore`,
+# so they are silently skipped rather than warned about. E.g. S/MIME signatures.
+_IGNORE_TYPES: frozenset[str] = frozenset({"application/x-pkcs7-signature"})
+
 
 class Dispatch(Translator):
     """Routes a document to email / text / pdf translators by mime type."""
@@ -32,6 +36,8 @@ class Dispatch(Translator):
             from .text import translator as target
         elif mime == "application/pdf":
             from .pdf import translator as target
+        elif mime in _IGNORE_TYPES:
+            from .ignore import translator as target
         else:
             # Unknown type: nothing to translate (TBD as types are added).
             print(
