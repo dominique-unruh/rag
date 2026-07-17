@@ -21,6 +21,8 @@ extractors:
         username: me@example.org
         # port: 993                  # optional; defaults to 993 (SSL) / 143 (plain)
         # ssl: true                  # optional; defaults to true
+        # auth: login                # optional; 'login' (default) or 'plain'
+        #                            # (SASL PLAIN) for servers that reject LOGIN
         # folders: [INBOX]           # optional; default: all folders on the server
         # exclude_folders: [Spam]    # optional; folders to skip (applied after the above)
         # Password resolution order (never put it here):

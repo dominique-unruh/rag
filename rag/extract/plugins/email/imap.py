@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ....errors import PluginError
 from ....secrets import Secrets
 from ....timestamps import parse_timestamp
 from ...base import Store
@@ -69,17 +70,40 @@ def _password(secrets: Secrets, account: Mapping[str, Any]) -> str:
     )
 
 
+def _authenticate(client: imaplib.IMAP4, mechanism: str, username: str, password: str) -> None:
+    """Authenticate ``client`` using the configured ``mechanism``.
+
+    ``login`` uses the IMAP ``LOGIN`` command (the imaplib default). ``plain`` uses
+    SASL ``AUTHENTICATE PLAIN`` — needed by servers (e.g. RWTH) that reject the
+    ``LOGIN`` command outright but accept the PLAIN mechanism over TLS.
+    """
+    if mechanism == "login":
+        client.login(username, password)
+    elif mechanism == "plain":
+        # SASL PLAIN response is "\0<authcid>\0<passwd>"; imaplib base64-encodes
+        # whatever the callback returns. authzid is left empty (same as authcid).
+        credentials = f"\0{username}\0{password}".encode("utf-8")
+        client.authenticate("PLAIN", lambda _challenge: credentials)
+    else:
+        raise PluginError(
+            f"unknown IMAP auth mechanism {mechanism!r}; use 'login' or 'plain'"
+        )
+
+
 def _connect(account: Mapping[str, Any], password: str) -> imaplib.IMAP4:
     """Open and authenticate an IMAP connection for ``account``.
 
     Uses SSL unless the account sets ``ssl: false``; picks a sensible default port
-    for the chosen transport when none is configured.
+    for the chosen transport when none is configured. The ``auth`` option selects
+    the authentication mechanism (``login`` default, or ``plain`` for SASL PLAIN).
     """
     host = str(account["host"])
     use_ssl = bool(account.get("ssl", True))
     # Default the port based on transport unless explicitly configured.
     port = int(account.get("port", _DEFAULT_SSL_PORT if use_ssl else _DEFAULT_PLAIN_PORT))
     username = str(account.get("username", account["account-id"]))
+    # Authentication mechanism; normalised to lower case for a forgiving match.
+    mechanism = str(account.get("auth", "login")).lower()
     # Socket timeout so a stalled server raises instead of hanging forever.
     timeout = float(account.get("timeout", _DEFAULT_TIMEOUT))
     # Choose the SSL or plaintext client accordingly.
@@ -88,7 +112,21 @@ def _connect(account: Mapping[str, Any], password: str) -> imaplib.IMAP4:
         if use_ssl
         else imaplib.IMAP4(host, port, timeout=timeout)
     )
-    client.login(username, password)
+    account_id = str(account["account-id"])
+    try:
+        _authenticate(client, mechanism, username, password)
+    except imaplib.IMAP4.error as exc:
+        # Turn imaplib's opaque auth failure into a clear, actionable message.
+        # A "BAD" reply means the server rejected the auth command itself (some
+        # servers reject the LOGIN command but accept 'auth: plain'), as opposed
+        # to "NO" for bad credentials — either way, name the account/host/user so
+        # it's obvious which one failed and how to fix it.
+        raise PluginError(
+            f"IMAP authentication failed for account {account_id!r} "
+            f"({username} at {host}:{port}, auth={mechanism}): {exc}. "
+            f"Check the username/password, or try a different 'auth' mechanism "
+            f"('login' or 'plain') — some servers reject 'login' but accept 'plain'."
+        ) from exc
     return client
 
 

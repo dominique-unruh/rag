@@ -5,8 +5,55 @@ from __future__ import annotations
 import email.policy
 from email import message_from_string
 
+import pytest
+
+from rag.errors import PluginError
 from rag.extract.plugins.email import build_stable_metadata, build_transient_metadata
-from rag.extract.plugins.email.imap import _list_folders, _looks_like_email, _truthy
+from rag.extract.plugins.email.imap import (
+    _authenticate,
+    _list_folders,
+    _looks_like_email,
+    _truthy,
+)
+
+
+class _FakeIMAP:
+    """Records which auth path imaplib would take, without a real server."""
+
+    def __init__(self) -> None:
+        """Start with no recorded auth call."""
+        self.login_args: tuple[str, str] | None = None
+        self.authenticate_args: tuple[str, bytes] | None = None
+
+    def login(self, user: str, password: str) -> None:
+        """Record a LOGIN-command auth."""
+        self.login_args = (user, password)
+
+    def authenticate(self, mechanism: str, authobject: object) -> None:
+        """Record a SASL AUTHENTICATE, capturing the callback's response bytes."""
+        self.authenticate_args = (mechanism, authobject(b""))  # type: ignore[operator]
+
+
+def test_authenticate_login() -> None:
+    """The 'login' mechanism uses the IMAP LOGIN command."""
+    client = _FakeIMAP()
+    _authenticate(client, "login", "user", "pw")  # type: ignore[arg-type]
+    assert client.login_args == ("user", "pw")
+    assert client.authenticate_args is None
+
+
+def test_authenticate_plain() -> None:
+    """The 'plain' mechanism sends SASL PLAIN as \\0user\\0pw."""
+    client = _FakeIMAP()
+    _authenticate(client, "plain", "user", "pw")  # type: ignore[arg-type]
+    assert client.login_args is None
+    assert client.authenticate_args == ("PLAIN", b"\x00user\x00pw")
+
+
+def test_authenticate_unknown_mechanism() -> None:
+    """An unknown mechanism fails clearly rather than silently doing nothing."""
+    with pytest.raises(PluginError):
+        _authenticate(_FakeIMAP(), "oauth", "u", "p")  # type: ignore[arg-type]
 
 
 def _parse(raw: str) -> "email.message.EmailMessage":
