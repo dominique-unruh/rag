@@ -44,16 +44,19 @@ _QDRANT_LOCK: threading.Lock = threading.Lock()
 
 
 @contextmanager
-def _open_qdrant(qdrant_path: Path) -> "Iterator[Any]":
-    """Open the embedded Qdrant store for one operation, then close it.
+def _open_qdrant(config: Config) -> "Iterator[Any]":
+    """Open the configured Qdrant store for one operation, then close it.
 
-    Guarded by a process-wide lock (embedded Qdrant is single-access) and closed
-    on exit so the lock/dir is free between requests.
+    Server mode (``vector_store.url``) or embedded-local, per config. Guarded by a
+    process-wide lock so the embedded-local store (single-access) is never opened
+    twice at once; with a Qdrant *server* the lock is harmless (the server handles
+    concurrency) and the open is cheap. Closed on exit so the embedded directory
+    lock is free between requests.
     """
-    from qdrant_client import QdrantClient
+    from ..embed.vectorstore import open_qdrant_client
 
     with _QDRANT_LOCK:
-        client = QdrantClient(path=str(qdrant_path))
+        client = open_qdrant_client(config)
         try:
             yield client
         finally:
@@ -305,8 +308,6 @@ def _create_app(database: IdleDatabase, blobs: BlobStore, config: Config) -> Fla
     them out of module globals lets the app be created fresh (reloader child).
     """
     app = Flask(__name__)
-    # Embedding config: model registry + the embedded Qdrant store location.
-    qdrant_path = config.storage_dir / "qdrant"
 
     def fetch_doc() -> sqlite3.Row | None:
         """Fetch the document identified by the request's source_type/doc_id args."""
@@ -557,7 +558,7 @@ def _create_app(database: IdleDatabase, blobs: BlobStore, config: Config) -> Fla
                 errors.append(f"unknown model {model_id}")
                 continue
             try:
-                with _open_qdrant(qdrant_path) as client:
+                with _open_qdrant(config) as client:
                     if not client.collection_exists(spec.collection):
                         continue
                     if spec.type == "sparse":
@@ -596,7 +597,7 @@ def _create_app(database: IdleDatabase, blobs: BlobStore, config: Config) -> Fla
         if not point_id:
             return _not_found("missing id")
         registry = load_models(config.raw)
-        with _open_qdrant(qdrant_path) as client:
+        with _open_qdrant(config) as client:
             for spec in registry.values():
                 if not client.collection_exists(spec.collection):
                     continue
@@ -630,7 +631,7 @@ def _create_app(database: IdleDatabase, blobs: BlobStore, config: Config) -> Fla
         registry = load_models(config.raw)
         entries: list[dict[str, Any]] = []
         try:
-            with _open_qdrant(qdrant_path) as client:
+            with _open_qdrant(config) as client:
                 flt = _payload_filter(source_type=source_type, doc_id=doc_id, set_id=int(set_id))
                 for spec in registry.values():
                     if not client.collection_exists(spec.collection):

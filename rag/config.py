@@ -76,6 +76,21 @@ class Config:
         raw = storage.get("dir", _DEFAULT_STORAGE_DIR) if isinstance(storage, Mapping) else _DEFAULT_STORAGE_DIR
         return self._resolve_path(str(raw))
 
+    @property
+    def vector_store(self) -> Mapping[str, Any]:
+        """Return the top-level ``vector_store`` config subtree (empty if absent).
+
+        Holds the Qdrant deployment settings: ``url`` (server mode; omit for the
+        embedded-local store under ``storage/qdrant``), ``prefer_grpc``,
+        ``timeout``, ``on_disk`` and an optional ``quantization`` subsection. The
+        server API key is not a config key — it is resolved from the keyring under
+        a fixed secret name (see :mod:`rag.embed.vectorstore`).
+        """
+        section = self._data.get("vector_store", {})
+        if not isinstance(section, Mapping):
+            raise ConfigError("top-level 'vector_store' must be a mapping")
+        return section
+
     def plugin_config(self, source_type: str) -> Mapping[str, Any]:
         """Return the config subtree for the extractor ``source_type``.
 

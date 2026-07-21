@@ -25,12 +25,11 @@ from .chunk import chunk_text
 from .models import ModelSpec, chunk_params, get_model, model_fingerprint
 from .sparse import sparse_vector
 from .store import DocRecord, EmbedStore
-from .vectorstore import SPARSE_VECTOR_NAME, VectorStore
+from .vectorstore import SPARSE_VECTOR_NAME, open_vector_store
 
 # Filenames/subdirs under the storage directory.
 _DB_FILENAME: str = "metadata.db"
 _BLOBS_SUBDIR: str = "blobs"
-_QDRANT_SUBDIR: str = "qdrant"
 
 # Namespace for deterministic point ids (so re-embedding is idempotent).
 _POINT_NS: uuid.UUID = uuid.UUID("6f4e2b90-1c2d-4e6a-9b7f-0a1b2c3d4e5f")
@@ -175,7 +174,10 @@ def run_embed(
     # One-time upgrade of any pre-marker blobs to the compressed format (no-op once
     # done). A pipeline run is a natural, single-writer moment to do this.
     blobs.migrate()
-    vectors = VectorStore(storage / _QDRANT_SUBDIR)
+    # Open the configured vector store (Qdrant server if vector_store.url is set,
+    # else the embedded-local store under storage/qdrant). Reuses the same secret
+    # resolver so a server API key is resolved under the run's TTY/headless policy.
+    vectors = open_vector_store(config, secrets=resolver)
     owns_db = db is None
     database = db if db is not None else Database.open(storage / _DB_FILENAME)
     try:

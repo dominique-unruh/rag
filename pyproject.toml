@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Local single-user RAG pipeline: extract, translate, embed, chat."
 readme = "README.md"
 requires-python = ">=3.11"
+# NOTE: when changing this list, also update the `_DEPS` array in `rag-cli`
+# (the convenience launcher keeps its own copy and does not read pyproject).
 dependencies = [
     "pyyaml",
     "keyring",

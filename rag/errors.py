@@ -54,3 +54,12 @@ class VectorStoreBusyError(RagError):
     ``rag embed`` run, or the db-browser reading it) hits this. The fix is to close
     the other user and retry.
     """
+
+
+class VectorStoreError(RagError):
+    """Raised when the Qdrant server cannot be reached, authenticated or configured.
+
+    Distinct from :class:`VectorStoreBusyError` (which is the embedded-local
+    single-writer contention): this covers server-mode transport/auth faults, so
+    the message can point at the URL / API key rather than a directory lock.
+    """

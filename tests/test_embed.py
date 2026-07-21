@@ -13,7 +13,7 @@ from rag.embed.chunk import chunk_text
 from rag.embed.models import chunk_params, get_model, load_models
 from rag.embed.pipeline import EmbedOptions, run_embed
 from rag.embed import vectorstore as vectorstore_mod
-from rag.embed.vectorstore import VectorStore
+from rag.embed.vectorstore import open_qdrant_client, open_vector_store
 from rag.errors import ConfigError, VectorStoreBusyError
 from rag.extract.store import SqliteStore
 from rag.translate.store import TranslationStore
@@ -83,7 +83,7 @@ def _config(storage: Path) -> Config:
 
 def _vector_count(storage: Path, collection: str = "emb_test") -> int:
     """Open the vector store and count points in ``collection``."""
-    vs = VectorStore(storage / "qdrant")
+    vs = open_vector_store(_config(storage))
     try:
         return vs.count(collection)
     finally:
@@ -184,14 +184,34 @@ def test_fingerprint_guard(tmp_path: Path) -> None:
 
 
 def test_vector_store_busy_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A locked Qdrant directory surfaces a clean VectorStoreBusyError."""
+    """A locked embedded Qdrant directory surfaces a clean VectorStoreBusyError."""
     def _boom(*_a: object, **_k: object) -> object:
         # Mimic embedded Qdrant's bare RuntimeError when the dir is already locked.
         raise RuntimeError("Storage folder is already accessed by another instance")
 
     monkeypatch.setattr(vectorstore_mod, "QdrantClient", _boom)
+    # No vector_store.url -> embedded-local branch, which maps the lock error.
+    config = Config({"storage": {"dir": str(tmp_path)}}, tmp_path / "config.yaml")
     with pytest.raises(VectorStoreBusyError):
-        VectorStore(tmp_path / "qdrant")
+        open_qdrant_client(config)
+
+
+def test_vector_store_rejects_server_only_options_without_url(tmp_path: Path) -> None:
+    """on_disk / quantization without a server url are refused, not silently ignored."""
+    base = {"storage": {"dir": str(tmp_path)}}
+    # on_disk without url.
+    cfg = Config({**base, "vector_store": {"on_disk": True}}, tmp_path / "c.yaml")
+    with pytest.raises(ConfigError):
+        open_vector_store(cfg)
+    # quantization without url.
+    cfg = Config(
+        {**base, "vector_store": {"quantization": {"type": "scalar"}}}, tmp_path / "c.yaml"
+    )
+    with pytest.raises(ConfigError):
+        open_vector_store(cfg)
+    # on_disk: false without url is fine (matches the in-RAM reality) -> no raise.
+    cfg = Config({**base, "vector_store": {"on_disk": False}}, tmp_path / "c.yaml")
+    open_vector_store(cfg).close()
 
 
 def test_embed_empty_part_records_but_no_points(tmp_path: Path) -> None:

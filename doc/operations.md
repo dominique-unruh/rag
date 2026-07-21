@@ -55,16 +55,95 @@ abort, it is never OK to corrupt*:
   `busy_timeout` makes the occasional second writer wait rather than error.
 - **Blobs**: immutable, content-addressed → all reads are lock-free; only GC
   deletes, and only under the write lock.
-- **Vector store (embedded Qdrant)**: single-process exclusive lock on the storage
-  directory. Current policy:
-  - **`embed`** acquires exclusive access for the *entire run*. While it runs, chat
-    cannot query the vector store.
-  - **`chat`** opens the Qdrant client on demand and **releases it after ~1s of
-    idle**, so `embed` can acquire the lock.
-  - This is an accepted limitation for now. If truly simultaneous embed + chat over
-    vectors becomes necessary, migrate to a vector store that supports multi-process
-    access (e.g. Qdrant in server mode, or `sqlite-vec`, which inherits the WAL
-    reader/writer model).
+- **Vector store (Qdrant)**: concurrency depends on the deployment mode (below).
+  - **Embedded-local**: single-process exclusive lock on the storage directory.
+    `embed` acquires it for the *entire run*; chat opens on demand and releases
+    after ~1s idle so `embed` can acquire it. An accepted limitation of this mode.
+  - **Server**: the server handles concurrency — `embed` and chat can talk to it
+    at once, no directory lock. This removes the limitation above.
+
+## Vector store (Qdrant): embedded-local vs server
+
+The vector backend is selected by the top-level `vector_store` config section.
+
+- **Embedded-local (default).** Omit `vector_store.url`. Qdrant runs in-process
+  (`QdrantClient(path=…)`) against `storage/qdrant`. It loads the whole collection
+  into **RAM** — simple and dependency-free, but RAM-bound and single-writer. Good
+  for development and small corpora.
+- **Server (recommended at scale).** Set `vector_store.url`. Vectors can live
+  **on disk** with optional **quantization**, so RAM holds only the HNSW graph
+  (+ quantized vectors), not every raw vector — required once the corpus outgrows
+  RAM. Run the server separately (e.g. `docker run -p 6333:6333 qdrant/qdrant`).
+
+```yaml
+vector_store:
+  url: "http://localhost:6333"    # set => server mode; omit => embedded-local
+  prefer_grpc: false              # gRPC transport (port 6334) instead of HTTP
+  timeout: 60                     # per-request timeout (seconds)
+  on_disk: true                   # store vectors on disk (default true in server mode)
+  quantization:                   # optional; omit for full-precision fp32
+    type: scalar                  # int8 scalar quantization (~4x smaller)
+    always_ram: false             # int8 copy on disk too (lowest RAM); true pins it in RAM
+```
+
+`on_disk` and `quantization` are **server-only** collection settings — the
+embedded-local store is always in RAM and cannot honour them. Setting either
+without a `url` is rejected with a `ConfigError` (rather than silently giving no
+benefit).
+
+**Create-only.** Both `on_disk` and `quantization` are read **only when a
+collection is first created** (the `embed` pass creates a model's collection on
+its first run). Editing them in `config.yaml` afterwards has **no effect** on an
+existing collection — the tooling never re-applies them. To change the storage
+profile of a populated model you must either:
+- **recreate** the collection — drop it (or the whole model's index) and re-embed
+  (cheap once an embedding cache exists), or re-run `migrate_qdrant_to_server.py`
+  into a fresh collection; or
+- issue a server-side **`update_collection`** (`quantization_config` / vectors
+  `on_disk`), after which Qdrant's optimizer rebuilds the affected data in the
+  background.
+
+So decide `on_disk` + `quantization` **before the first `embed`** of each model
+(or before running the migration).
+
+**Authentication.** The API key is **not** a config option: when the server needs
+one, store it in the keyring in the shared `rag` service (the same service the
+email plugin uses), under a name **scoped to the server's host:port** —
+`vector_store_api_key:<host>:<port>`. The host:port suffix (derived from
+`vector_store.url`; default port 6333) ensures a key stored for one server is
+never sent to a different one by accident. E.g. for `http://localhost:6333`:
+
+```sh
+keyring set rag vector_store_api_key:localhost:6333
+```
+
+The client resolves it from there (keyring/file) and never prompts — an absent key
+simply means "no auth". Options, in the order you'd reach for them on a single-user box:
+- **None + network isolation** — bind the server to localhost / a private network
+  and set no key. Fine when nothing else can reach the port. Store nothing.
+- **Static API key** — start the server with `QDRANT__SERVICE__API_KEY=…` and store
+  that same value under `vector_store_api_key:<host>:<port>`. Sent as the `api-key`
+  header. Use an `https://` URL so it isn't sent in clear. A separate
+  `QDRANT__SERVICE__READ_ONLY_API_KEY` can gate read-only clients (db-browser /
+  chat) from the writer (`embed`).
+- **JWT / RBAC** (Qdrant ≥1.9, requires an API key set) — a signed token scoping
+  access to specific collections, read-only, payload filters, and expiry. Store the
+  token under `vector_store_api_key:<host>:<port>`; the client sends it identically.
+- **TLS** — use `https://` in the URL; the client negotiates TLS. (Mutual-TLS /
+  client certificates are possible server-side but not wired into the config here.)
+
+**Migrating an existing embedded-local store to a server.** The two on-disk formats
+are incompatible, so you copy the points rather than move files:
+1. Start the server and add the `vector_store` section above to `config.yaml`.
+2. Run `python scripts/migrate_qdrant_to_server.py --config config.yaml` once. It
+   reads the local store at `storage/qdrant`, recreates each collection on the
+   server with your `on_disk`/`quantization` profile, and copies every point
+   (deterministic ids → re-runnable, no duplicates). It never deletes the local
+   directory — remove it yourself once the server is verified.
+
+> Note: `maintenance stats` measures `vector_store_bytes` from the local
+> `storage/qdrant` directory only; in server mode the vectors live on the server
+> host, so that figure reads 0 here.
 
 ## Backups (SQLite + WAL)
 
