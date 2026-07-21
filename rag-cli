@@ -7,8 +7,17 @@
 # Usage: ./rag-cli -v extract email count=1
 set -euo pipefail
 
-# Absolute path to this script's directory (the repo root).
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Absolute path to this script's directory (the repo root). Resolve any symlink
+# chain first, so invoking via a symlink (e.g. ~/bin/rag -> /repo/rag-cli) uses the
+# real script location for the venv + PYTHONPATH, not the symlink's directory.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+    LINK_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    # A relative link target is relative to the directory holding the link.
+    [[ $SOURCE == /* ]] || SOURCE="$LINK_DIR/$SOURCE"
+done
+DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 VENV="$DIR/.venv"
 PY="$VENV/bin/python"
 
@@ -54,6 +63,11 @@ fi
 # talk to the same D-Bus secret service (gnome-keyring / KWallet), so stored
 # passwords are interchangeable.
 export PYTHON_KEYRING_BACKEND="keyring.backends.SecretService.Keyring"
+
+# Point the CLI at the repo's config.yaml as a fallback, so `rag` finds it when
+# invoked (via a symlink) from a working directory that has no ./config.yaml. An
+# explicit --config or a ./config.yaml in the cwd still takes precedence.
+export RAG_CONFIG="$DIR/config.yaml"
 
 # Put the repo on sys.path so `rag` imports, and use the venv interpreter.
 exec env PYTHONPATH="$DIR" "$PY" -m rag.cli "$@"

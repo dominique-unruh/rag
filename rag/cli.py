@@ -8,6 +8,7 @@ and ``maintenance``. Agentic chat mode is still pending (see ``PLAN.md``).
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -17,8 +18,31 @@ from .extract.runner import run_extraction
 from .interrupt import graceful_interrupts
 from .secrets import Secrets
 
-# Default config file path used when ``--config`` is not supplied.
-_DEFAULT_CONFIG: str = "./config.yaml"
+# Config filename searched for when ``--config`` is not supplied.
+_CONFIG_FILENAME: str = "config.yaml"
+# Environment variable holding a fallback config path (set by the ``rag-cli``
+# launcher to the repo directory), used when the working dir has no config.
+_CONFIG_ENV: str = "RAG_CONFIG"
+
+
+def _resolve_config_path(explicit: Path | None) -> Path:
+    """Pick which config file to load.
+
+    An explicit ``--config`` wins. Otherwise prefer ``./config.yaml`` in the
+    working directory; if that is absent, fall back to ``$RAG_CONFIG`` (the
+    launcher points this at the repo directory so ``rag`` works from any cwd).
+    Falls back to the working-directory path so a missing-file error names the
+    familiar location.
+    """
+    if explicit is not None:
+        return explicit
+    cwd_config = Path(_CONFIG_FILENAME)
+    if cwd_config.exists():
+        return cwd_config
+    env_config = os.environ.get(_CONFIG_ENV)
+    if env_config and Path(env_config).exists():
+        return Path(env_config)
+    return cwd_config
 
 
 def _parse_kv_options(pairs: list[str]) -> dict[str, str]:
@@ -43,8 +67,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="rag", description="Local RAG pipeline.")
     # Global option: which config file to load.
     parser.add_argument(
-        "--config", default=_DEFAULT_CONFIG, type=Path,
-        help="path to the YAML config file (default: %(default)s)",
+        "--config", default=None, type=Path,
+        help=f"path to the YAML config file (default: ./{_CONFIG_FILENAME}, "
+             f"else ${_CONFIG_ENV})",
     )
     # Global verbose flag: plugins print a one-liner per item when set.
     parser.add_argument(
@@ -267,6 +292,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         argcomplete.autocomplete(parser)
     args = parser.parse_args(argv)
+    # Resolve the config path once (explicit flag > ./config.yaml > $RAG_CONFIG)
+    # so every handler's Config.load sees the same choice.
+    args.config = _resolve_config_path(args.config)
     # Subcommand handlers; the long-running pipeline commands run under a graceful
     # SIGINT handler so a first Ctrl-C stops at the next item, not mid-write.
     handlers = {
