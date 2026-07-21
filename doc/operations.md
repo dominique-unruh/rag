@@ -15,6 +15,10 @@ A top-level dispatcher (`rag`) with subcommands (each also runnable as a package
   - **dry-run mode**: don't store in DB (allowed even on a dirty repo).
 - **`embed`** — embed a filtered subset (per model); auto-updates changed
   translations. See [embedding.md](embedding.md).
+- **`chat`** — interactive chat over the RAG (simple / retrieve-then-read mode).
+  `--model` picks the chat LLM (default `chat.default_model`), `--top-k` the number
+  of retrieved chunks, `--models` restricts which embedding indices are queried.
+  See [chat.md](chat.md).
 - **`maintenance <tool>`**:
   - `db-browser` — a local web UI for browsing the extraction database. Split
     screen: the `documents` rows with their most relevant fields on top; the
@@ -33,7 +37,7 @@ A top-level dispatcher (`rag`) with subcommands (each also runnable as a package
     allocation via `du`), the vector store directory, and each plugin's state dir. `--source <type>` restricts to one source; `--json` emits
     machine-readable output.
 
-The **`chat`** subcommand and GC maintenance tasks are not built yet — see
+The **agentic** chat mode and GC maintenance tasks are not built yet — see
 [`../PLAN.md`](../PLAN.md).
 
 **Safety principle — prefer failing over corrupting.** Every maintenance/GC

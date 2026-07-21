@@ -2,12 +2,13 @@
 
 Reference docs for the **implemented** parts of the RAG pipeline — a local,
 single-user system that ingests personal data (email, notes, …), turns it into
-clean Markdown, and embeds it into a vector index. Work still to be built (the
-chat module, GC/stats maintenance, further source plugins) lives in
+clean Markdown, embeds it into a vector index, and chats over it. Work still to be
+built (agentic chat mode, GC maintenance, further source plugins) lives in
 [`../PLAN.md`](../PLAN.md).
 
 Pipeline stages: **extract → translate → embed → chat**. Extraction, translation
-and embedding are implemented; chat is not yet.
+and embedding are implemented, as is chat **simple mode**; agentic chat mode is
+not yet built.
 
 ## Index
 
@@ -18,6 +19,8 @@ and embedding are implemented; chat is not yet.
   pipeline's bookkeeping, and the built-in translators.
 - [embedding.md](embedding.md) — module 3: the multi-model index, per-(part,
   model) bookkeeping, embed passes, cross-index cleanup.
+- [chat.md](chat.md) — module 4 (simple mode): retrieval + RRF fusion, chunk-text
+  reconstruction, the chat LLM backends, and the REPL.
 - [configuration.md](configuration.md) — the central YAML config, secret
   resolution (keyring / OAuth2 tokens), and shared timestamp parsing.
 - [operations.md](operations.md) — the CLI tools, concurrency model, and backups.
@@ -89,6 +92,13 @@ rag/
       email.py text.py pdf.py ignore.py
   embed/
     models.py backends.py sparse.py chunk.py vectorstore.py store.py pipeline.py
+  chat/
+    models.py        # chat LLM registry (ChatModelSpec, default selection)
+    llm.py           # streaming chat backends (ollama / openai)
+    retrieve.py      # multi-model search + RRF fusion + chunk-text reconstruction
+    prompt.py        # simple-mode prompt construction (pure)
+    terminal.py      # OSC 8 hyperlinks + citation parsing
+    session.py       # readline REPL (retrieve-then-read loop)
   maintenance/       # db-browser (web UI), delete (cascading store API)
 tests/
 ```

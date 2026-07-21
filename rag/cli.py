@@ -1,8 +1,8 @@
 """Top-level command-line entry point (PLAN §8).
 
-Dispatches subcommands to the pipeline modules. Only ``extract`` (module 1) is
-implemented so far; ``translate`` / ``embed`` / ``chat`` / ``maintenance`` will
-be added as those modules land.
+Dispatches subcommands to the pipeline modules: ``extract`` (module 1),
+``translate`` (module 2), ``embed`` (module 3), ``chat`` (module 4, simple mode)
+and ``maintenance``. Agentic chat mode is still pending (see ``PLAN.md``).
 """
 
 from __future__ import annotations
@@ -100,6 +100,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help="re-embed even documents already up to date for this model",
     )
 
+    # --- chat subcommand -------------------------------------------------
+    chat = subparsers.add_parser("chat", help="chat over the RAG (retrieval-augmented)")
+    chat.add_argument(
+        "--model", dest="model",
+        help="chat model id (from config chat.models; default: chat.default_model)",
+    )
+    chat.add_argument(
+        "--mode", choices=["simple"], default="simple",
+        help="chat mode (only 'simple'/retrieve-then-read is implemented; default: %(default)s)",
+    )
+    chat.add_argument(
+        "--top-k", dest="top_k", type=int,
+        help="number of chunks to retrieve per turn (default: chat.retrieval.top_k)",
+    )
+    chat.add_argument(
+        "--models", dest="embed_models",
+        help="comma-separated embedding model ids to retrieve from (default: all configured)",
+    )
+
     # --- maintenance subcommand (with its own sub-tools) -----------------
     maintenance = subparsers.add_parser("maintenance", help="run a maintenance tool")
     tools = maintenance.add_subparsers(dest="tool", required=True)
@@ -174,6 +193,26 @@ def _cmd_embed(args: argparse.Namespace) -> None:
     print(f"embedded {count} document(s) into {args.model}")
 
 
+def _cmd_chat(args: argparse.Namespace) -> None:
+    """Handle ``rag chat`` — run the interactive chat REPL (simple mode)."""
+    from .chat.session import run_chat_simple
+
+    config = Config.load(args.config)
+    # Chat may resolve a chat-model / dense-embedder API key, so allow prompting
+    # (and honour --reauth) rather than forcing the headless resolver.
+    secrets = Secrets(reauth=args.reauth)
+    # Optional embedding-model subset for retrieval; None => every configured model.
+    embed_models = [m for m in (args.embed_models or "").split(",") if m] or None
+    run_chat_simple(
+        config,
+        model_id=args.model,
+        top_k=args.top_k,
+        embed_model_ids=embed_models,
+        verbose=args.verbose,
+        secrets=secrets,
+    )
+
+
 def _cmd_maintenance(args: argparse.Namespace) -> None:
     """Handle ``rag maintenance`` — dispatch to the selected maintenance tool."""
     config = Config.load(args.config)
@@ -234,6 +273,7 @@ def main(argv: list[str] | None = None) -> int:
         "extract": _cmd_extract,
         "translate": _cmd_translate,
         "embed": _cmd_embed,
+        "chat": _cmd_chat,
         "maintenance": _cmd_maintenance,
     }
     graceful = {"extract", "translate", "embed"}

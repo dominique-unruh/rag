@@ -5,35 +5,40 @@ turns it into clean Markdown, embeds it into a vector index, and exposes a chat
 interface over it.
 
 The pipeline has four stages — **Extract → Translate → Embed → Chat**. The first
-three are **implemented**; their architecture is documented under
-[`doc/`](doc/) (start at [`doc/README.md`](doc/README.md)). This file tracks only
-what is **not yet built**.
+three are **implemented**, as is chat **simple mode**; their architecture is
+documented under [`doc/`](doc/) (start at [`doc/README.md`](doc/README.md)). This
+file tracks only what is **not yet built**.
 
 ---
 
-## Module 4 — Chat (not built)
+## Module 4 — Chat
 
 Chat interface over the RAG, with selectable modes and LLM models.
 
-- **Simple mode**: the LLM is given search results retrieved for the user's query
-  and answers from them.
-- **Complex mode**: the LLM can actively access the RAG, the raw documents, the
-  translations, and perform web searches; it plans its own retrieval strategy.
+- **Simple mode** (*retrieve-then-read*) — **implemented** (`rag chat`, see
+  [`doc/chat.md`](doc/chat.md)). For each turn: retrieve the most relevant chunks
+  for the user's query, fuse them, and let the LLM answer from that context. A
+  readline-backed REPL (line editing + persistent history under
+  `storage/chat_history`).
+- **Complex / agentic mode** — **not built**. The LLM can actively access the RAG,
+  the raw documents, the translations, and perform web searches; it plans its own
+  retrieval strategy.
 
 Model and mode are selectable on the command line. Chat LLMs use the same backend
 options as embedding models (see [`doc/embedding.md`](doc/embedding.md)): an
 **OpenAI-compatible** endpoint (hosted, or local via Ollama's `/v1` / LM Studio /
 vLLM / llama.cpp) or **native Ollama**.
 
-**Retrieval / fusion.** When several embedding models are populated, retrieval
-queries each selected model's index and **fuses** the ranked lists (e.g.
-Reciprocal Rank Fusion) into one result set — this is where a dense model and a
+**Retrieval / fusion (implemented).** When several embedding models are populated,
+retrieval queries each selected model's index and **fuses** the ranked lists via
+Reciprocal Rank Fusion into one result set — this is where a dense model and a
 sparse/lexical model combine into hybrid search (semantic recall + exact token
-matches). Which models participate is a query-time choice; a model with incomplete
-coverage simply contributes what it has. (A cross-encoder reranker could later sit
-after fusion as an optional query-time stage — no index change.)
+matches). Which models participate is a query-time choice (`--models`); a model
+with incomplete coverage simply contributes what it has. (A cross-encoder reranker
+could later sit after fusion as an optional query-time stage — no index change.)
 
-The `chat` CLI subcommand is likewise not built yet.
+**Still to build for module 4:** agentic mode; optional answer streaming niceties
+(a spinner/cancellation polish); a cross-encoder reranker after fusion.
 
 ---
 
@@ -76,8 +81,8 @@ The `maintenance` dispatcher exists with `db-browser`, `delete` and `stats` (see
 
 ## Remaining build order
 
-1. **Module 4 (chat)**: simple mode first, then complex mode; fuse multiple
-   embedding indices when present.
+1. **Module 4 (chat)**: simple mode is built; **agentic mode** next. Fusion of
+   multiple embedding indices is in place.
 2. **Additional extraction plugins** (see *More extractors* above), now that email
    has proven the design.
 3. **Maintenance**: GC.

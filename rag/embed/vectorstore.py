@@ -20,6 +20,7 @@ using an ``https://`` URL.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -57,6 +58,17 @@ _API_KEY_SECRET_PREFIX: str = "vector_store_api_key"
 # Default Qdrant port assumed when a URL omits one (keeps the derived secret name
 # stable and identical to the Makefile's derivation).
 _DEFAULT_PORT: int = 6333
+
+
+@dataclass(frozen=True)
+class SearchHit:
+    """One scored point returned by a similarity search (chat retrieval, §7)."""
+
+    score: float
+    """The point's similarity score for this query (per-model; higher = closer)."""
+
+    payload: dict[str, Any]
+    """The point's stored payload (source_type, doc_id, set_id, part_id, chunk)."""
 
 
 def _api_key_secret(url: str) -> str:
@@ -299,6 +311,38 @@ class VectorStore:
     def count(self, collection: str) -> int:
         """Return the number of points in ``collection`` (for tests/stats)."""
         return self._client.count(collection).count
+
+    def has_collection(self, collection: str) -> bool:
+        """Whether ``collection`` exists (so chat retrieval skips unpopulated models)."""
+        return self._client.collection_exists(collection)
+
+    def search_dense(self, collection: str, vector: list[float], limit: int) -> list[SearchHit]:
+        """Return the ``limit`` nearest dense points to ``vector`` (score + payload).
+
+        Used by chat retrieval (§7); payloads are needed to reconstruct chunk text,
+        so vectors themselves are not requested back.
+        """
+        response = self._client.query_points(
+            collection, query=vector, limit=limit, with_payload=True
+        )
+        return [SearchHit(float(h.score), dict(h.payload or {})) for h in response.points]
+
+    def search_sparse(
+        self, collection: str, indices: list[int], values: list[float], limit: int
+    ) -> list[SearchHit]:
+        """Return the ``limit`` best sparse matches for the query term vector.
+
+        The collection applies its IDF modifier at query time, so passing raw term
+        frequencies (indices + values) yields BM25-style scoring.
+        """
+        response = self._client.query_points(
+            collection,
+            query=models.SparseVector(indices=indices, values=values),
+            using=SPARSE_VECTOR_NAME,
+            limit=limit,
+            with_payload=True,
+        )
+        return [SearchHit(float(h.score), dict(h.payload or {})) for h in response.points]
 
     def close(self) -> None:
         """Release the Qdrant client (and, in embedded mode, its directory lock)."""

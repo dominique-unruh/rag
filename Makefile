@@ -14,7 +14,7 @@ CONFIG     ?= config.yaml
 QDRANT_IMAGE ?= qdrant/qdrant
 QDRANT_NAME  ?= rag-qdrant
 
-.PHONY: extract extract_full delete translate embed browse pipeline ollama qdrant-server qdrant-server-stop
+.PHONY: extract extract_full delete translate embed browse chat pipeline ollama qdrant-server qdrant-server-stop
 
 ## Extract up to LIMIT emails: all of the 'private' account, plus the INBOX of
 ## 'rwth', 'ut' and 'qis-office'. Additive only — no deletions here (a message
@@ -45,13 +45,18 @@ translate:
 	$(RAG) --verbose translate --limit $(LIMIT)
 
 ## Embed up to LIMIT documents into MODEL's index (needs the Ollama server).
-embed: ollama
+embed: ollama qdrant-server
 	$(RAG) --verbose embed --model bm25 # --limit $(LIMIT)
 	$(RAG) --verbose embed --model qwen3-8b # --limit $(LIMIT)
 
 ## Launch the db-browser web UI.
 browse:
 	$(RAG) maintenance db-browser
+
+## Interactive chat over the RAG (simple mode). Needs the Ollama server (chat
+## model) and, in server mode, the Qdrant server for retrieval.
+chat: ollama qdrant-server
+	$(RAG) chat
 
 ## Run the full pipeline. Every stage runs even if an earlier one fails, but
 ## the target exits non-zero if any stage failed.
