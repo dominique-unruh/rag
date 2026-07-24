@@ -4,6 +4,7 @@
 
 RAG        := ./rag-cli
 LIMIT      ?= 10
+SINCE      := 2026-07-01
 OLLAMA_URL ?= http://localhost:11434
 # Cap concurrent request contexts to 1: single-user serial embedding never needs
 # more, and each extra context multiplies peak RAM (guards against swap).
@@ -21,10 +22,10 @@ QDRANT_NAME  ?= rag-qdrant
 ## moved out of a synced folder is never mistaken for a deletion). Run `make
 ## delete` to reconcile removals.
 extract:
-	$(RAG) --verbose extract email account=private count=$(LIMIT)
-	$(RAG) --verbose extract email account=rwth folder=INBOX count=$(LIMIT)
-	$(RAG) --verbose extract email account=ut folder=INBOX count=$(LIMIT)
-	$(RAG) --verbose extract email account=qis-office folder=INBOX count=$(LIMIT)
+	$(RAG) --verbose extract email account=private "since=$(SINCE)"
+	$(RAG) --verbose extract email account=rwth "since=$(SINCE)"
+	$(RAG) --verbose extract email account=ut "since=$(SINCE)"
+	$(RAG) --verbose extract email account=qis-office "since=$(SINCE)"
 
 ## Like `extract`, but a full resync (full=true): re-fetch every message,
 ## ignoring the stored per-folder UID memory.
@@ -50,7 +51,7 @@ embed: ollama qdrant-server
 	$(RAG) --verbose embed --model qwen3-8b # --limit $(LIMIT)
 
 ## Launch the db-browser web UI.
-browse:
+browse: ollama qdrant-server
 	$(RAG) maintenance db-browser
 
 ## Interactive chat over the RAG (simple mode). Needs the Ollama server (chat
