@@ -164,6 +164,13 @@ def _build_parser() -> argparse.ArgumentParser:
     stats = tools.add_parser("stats", help="count everything in the database")
     stats.add_argument("--source", dest="source_type", help="restrict counts to one source_type")
     stats.add_argument("--json", dest="as_json", action="store_true", help="emit JSON instead of text")
+
+    # fsck: check storage-model invariants (dangling rows/points, plugin state)
+    fsck = tools.add_parser("fsck", help="check storage-model invariants and report violations")
+    fsck.add_argument(
+        "--fix", choices=["no", "ask", "yes"], default="no",
+        help="apply fixes: 'no' (report only, default), 'ask' (confirm each), 'yes' (apply all)",
+    )
     return parser
 
 
@@ -253,6 +260,14 @@ def _cmd_maintenance(args: argparse.Namespace) -> None:
         from .maintenance.stats import run_stats
 
         run_stats(config, source_type=args.source_type, as_json=args.as_json)
+    elif args.tool == "fsck":
+        # Imported lazily so the check code loads only when needed.
+        from .maintenance.fsck import run_fsck
+
+        # A non-empty error count becomes a non-zero exit code.
+        secrets = Secrets(reauth=args.reauth)
+        if run_fsck(config, secrets=secrets, fix=args.fix):
+            raise SystemExit(1)
 
 
 def _maintenance_delete(args: argparse.Namespace, config: Config) -> None:

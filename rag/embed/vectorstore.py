@@ -19,7 +19,7 @@ using an ``https://`` URL.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -311,6 +311,37 @@ class VectorStore:
     def count(self, collection: str) -> int:
         """Return the number of points in ``collection`` (for tests/stats)."""
         return self._client.count(collection).count
+
+    def delete_points(self, collection: str, point_ids: list[Any]) -> None:
+        """Delete specific points by id (used by fsck to drop dangling points)."""
+        if not point_ids:
+            return
+        self._client.delete(collection, points_selector=models.PointIdsList(points=point_ids))
+
+    def list_collections(self) -> list[str]:
+        """Return the names of all collections in the store (for fsck/maintenance)."""
+        return [c.name for c in self._client.get_collections().collections]
+
+    def iter_points(self, collection: str) -> "Iterator[tuple[Any, dict[str, Any]]]":
+        """Yield ``(point_id, payload)`` for every point in ``collection``.
+
+        Scrolls the whole collection in pages (payload only, no vectors) so fsck
+        can reconcile stored points against the metadata DB without loading the
+        vectors. Yields nothing for a collection that does not exist.
+        """
+        if not self._client.collection_exists(collection):
+            return
+        offset: Any = None
+        while True:
+            # Page through with the opaque scroll offset Qdrant returns each round.
+            points, offset = self._client.scroll(
+                collection, limit=1000, offset=offset, with_payload=True, with_vectors=False
+            )
+            for point in points:
+                yield point.id, dict(point.payload or {})
+            # A None next-offset means the last page was returned.
+            if offset is None:
+                break
 
     def has_collection(self, collection: str) -> bool:
         """Whether ``collection`` exists (so chat retrieval skips unpopulated models)."""

@@ -14,6 +14,7 @@ testable without a live server.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from datetime import datetime
@@ -25,14 +26,17 @@ from typing import Any
 from urllib.parse import quote, quote_plus
 
 from ....errors import ConfigError, PluginError
+from ....fsck import FixMode, ask_fix, print_problem
 from ....interrupt import interrupt_requested
 from ....secrets import Secrets
 from ....timestamps import format_timestamp
 from ...base import Extractor, Store
 from .imap import (
     _SECRETS_SUBDIR,
+    _UIDMAP_FILENAME,
     _entry_message_id,
     _load_uidmap,
+    _save_uidmap,
     _truthy,
     extract_account,
     run_deletions,
@@ -213,6 +217,26 @@ def _accounts_from_config(config: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return accounts
 
 
+def _clear_extracted(data: Mapping[str, Any], message_id: str) -> int:
+    """Set ``extracted=false`` on every uid entry with ``message_id`` in ``data``.
+
+    Mutates the loaded presence-file mapping in place and returns how many entries
+    were changed. Used by :meth:`EmailExtractor.fsck` to repair an invariant-2
+    violation (more than one uid flagged extracted for one message-id).
+    """
+    cleared = 0
+    for account_entry in data.get("accounts", {}).values():
+        folders = account_entry.get("folders", {}) if isinstance(account_entry, dict) else {}
+        for folder_entry in folders.values():
+            uids = folder_entry.get("uids", {}) if isinstance(folder_entry, dict) else {}
+            for entry in uids.values():
+                # Only object-form entries carry the flag; clear the true ones.
+                if isinstance(entry, dict) and entry.get("message-id") == message_id and entry.get("extracted"):
+                    entry["extracted"] = False
+                    cleared += 1
+    return cleared
+
+
 class EmailExtractor(Extractor):
     """Extractor that syncs one or more IMAP accounts into the store."""
 
@@ -336,3 +360,91 @@ class EmailExtractor(Extractor):
             "distinct_message_ids": len(all_message_ids),
             "oauth_tokens_stored": oauth_tokens,
         }
+
+    def fsck(self, state_dir: Path, config: Mapping[str, Any], fix: FixMode) -> int:
+        """Validate the presence file (``uidmap.json``) shape and its invariants.
+
+        Checks, without touching the network: the file is valid JSON with the
+        expected ``accounts -> folders -> uids`` nesting; every uid entry is a
+        ``{"message-id": str, "extracted": bool}`` object; and invariant 2 — no two
+        uids may carry ``extracted: true`` for the same message-id (only one stored
+        copy exists per message-id). Prints each problem as found and returns the
+        error count.
+
+        Fixable: invariant-2 violations. Since we cannot know which uid was the
+        stored copy, the fix sets ``extracted=false`` for **all** uids of that
+        message-id (a normal extract then re-stores exactly one).
+        """
+        errors = 0
+        path = state_dir / _UIDMAP_FILENAME
+        if not path.exists():
+            # Nothing tracked yet is a valid, healthy state.
+            return 0
+        # Read the raw file so a malformed JSON is itself reported (rather than
+        # silently swallowed by the tolerant loader).
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            print_problem(f"[email] {_UIDMAP_FILENAME} is unreadable or not valid JSON: {exc}")
+            return 1
+        accounts = data.get("accounts") if isinstance(data, dict) else None
+        if not isinstance(accounts, dict):
+            print_problem(f"[email] {_UIDMAP_FILENAME}: top-level 'accounts' is missing or not an object")
+            return 1
+        # message-id -> number of uids flagged extracted=true (for invariant 2).
+        true_holders: dict[str, int] = {}
+        for account_id, account_entry in accounts.items():
+            folders = account_entry.get("folders") if isinstance(account_entry, dict) else None
+            if not isinstance(folders, dict):
+                print_problem(f"[email] account {account_id!r}: 'folders' is missing or not an object")
+                errors += 1
+                continue
+            for folder, folder_entry in folders.items():
+                uids = folder_entry.get("uids") if isinstance(folder_entry, dict) else None
+                if not isinstance(uids, dict):
+                    print_problem(f"[email] {account_id}/{folder}: 'uids' is missing or not an object")
+                    errors += 1
+                    continue
+                for uid, entry in uids.items():
+                    # Each entry must be the object form; message-id a non-empty
+                    # string and extracted a real boolean.
+                    if not isinstance(entry, dict):
+                        print_problem(
+                            f"[email] {account_id}/{folder} uid {uid}: entry is not an object "
+                            f"(got {type(entry).__name__})"
+                        )
+                        errors += 1
+                        continue
+                    mid = entry.get("message-id")
+                    if not isinstance(mid, str) or not mid:
+                        print_problem(
+                            f"[email] {account_id}/{folder} uid {uid}: 'message-id' missing or not a non-empty string"
+                        )
+                        errors += 1
+                        continue
+                    extracted = entry.get("extracted")
+                    if not isinstance(extracted, bool):
+                        print_problem(
+                            f"[email] {account_id}/{folder} uid {uid}: 'extracted' missing or not a boolean"
+                        )
+                        errors += 1
+                        continue
+                    if extracted:
+                        true_holders[mid] = true_holders.get(mid, 0) + 1
+        # Invariant 2: at most one extracted=true per message-id. Fixable.
+        for mid, count in sorted(true_holders.items()):
+            if count <= 1:
+                continue
+            print_problem(
+                f"[email] message-id {mid!r} has {count} uids with extracted=true (must be <= 1)"
+            )
+            errors += 1
+            if ask_fix(
+                fix,
+                f"Fix: set extracted=false for all {count} uids with message-id {mid!r} "
+                f"(a normal extract then re-stores exactly one)",
+            ):
+                cleared = _clear_extracted(data, mid)
+                _save_uidmap(state_dir, data)
+                print(f"  cleared extracted on {cleared} uid(s) for {mid!r}")
+        return errors

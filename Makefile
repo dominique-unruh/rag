@@ -4,7 +4,7 @@
 
 RAG        := ./rag-cli
 LIMIT      ?= 10
-SINCE      := 2026-07-01
+SINCE      := 2026-06-01
 OLLAMA_URL ?= http://localhost:11434
 # Cap concurrent request contexts to 1: single-user serial embedding never needs
 # more, and each extra context multiplies peak RAM (guards against swap).

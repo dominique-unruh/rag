@@ -36,6 +36,24 @@ A top-level dispatcher (`rag`) with subcommands (each also runnable as a package
     use**: the metadata DB (with WAL sidecars), the blob store (actual disk
     allocation via `du`), the vector store directory, and each plugin's state dir. `--source <type>` restricts to one source; `--json` emits
     machine-readable output.
+  - `fsck` — check the storage-model invariants that are *assumed* but not
+    enforced (a crash between the SQLite / vector / blob stores, a half-finished
+    run, or a manual edit can break them). Read-only. Each invariant is one check:
+    dangling translation sets (no document), parts (no set) and embeddings rows
+    (no part/set/document); more than one active translation set per document;
+    blob references with no blob on disk; **dangling vector-store points** (no
+    backing embeddings row/document) and collections matching no configured model.
+    It also calls each extractor's `fsck()` on its own state dir — the email plugin
+    validates its presence file (`uidmap.json`): correct JSON/shape and no two uids
+    flagged `extracted:true` for the same message-id. Problems print as they are
+    found; exits non-zero if any *error*-severity problem is found. `--fix` applies
+    repairs — `no` (report only, default), `ask` (confirm each), `yes` (apply all);
+    each fix announces exactly what it changes. Fixes so far: **dangling points**
+    are deleted from their collection; an email **invariant-2** violation clears
+    `extracted` on all uids of that message-id (a later extract re-stores exactly
+    one). A central check attaches a fix by setting `apply_fix`/`fix_description` on
+    its `Problem`; a plugin fixes inside its own `fsck` — both via the shared
+    `ask_fix` helper (`rag/fsck.py`). Extend either way.
 
 The **agentic** chat mode and GC maintenance tasks are not built yet — see
 [`../PLAN.md`](../PLAN.md).

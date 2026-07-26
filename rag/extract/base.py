@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..fsck import FixMode
 from ..secrets import Secrets
 
 
@@ -178,3 +179,22 @@ class Extractor(ABC):
         stats tool, not here. Not abstract — the default is no plugin stats.
         """
         return {}
+
+    def fsck(self, state_dir: Path, config: Mapping[str, Any], fix: FixMode) -> int:
+        """Check this plugin's own persisted state, **printing** problems as found.
+
+        Called by the ``fsck`` maintenance tool for each extractor. Given the
+        plugin's private ``state_dir`` and its config subtree, validate whatever
+        invariants the plugin's state files are assumed to satisfy (correct shape,
+        internal consistency). Print each problem immediately with
+        :func:`rag.fsck.print_problem` and return the number of **error**-severity
+        problems found (0 means healthy). ``fix`` selects the fix policy: for a
+        fixable problem, call :func:`rag.fsck.ask_fix` and, if it returns ``True``,
+        apply the fix to ``state_dir`` (a problem is still counted even when fixed).
+
+        Like :meth:`statistics`, this must be **cheap and state-only**: read only
+        the plugin's already-persisted ``state_dir`` — no network, no IMAP, no DB
+        scans (the DB-side structural checks are done centrally by the fsck tool).
+        Not abstract — the default is no checks.
+        """
+        return 0
