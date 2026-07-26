@@ -11,9 +11,13 @@ from rag.errors import PluginError
 from rag.extract.plugins.email import build_stable_metadata, build_transient_metadata
 from rag.extract.plugins.email.imap import (
     _authenticate,
+    _demote_siblings,
+    _entry_extracted,
+    _entry_message_id,
     _list_folders,
     _looks_like_email,
     _truthy,
+    _uid_already_stored,
 )
 
 
@@ -188,3 +192,63 @@ def test_build_transient_metadata() -> None:
         "folder": "INBOX",
         "read": True,
     }
+
+
+def test_entry_message_id_reads_both_shapes() -> None:
+    """message-id is read from the new object shape and the legacy bare string."""
+    assert _entry_message_id({"message-id": "m1", "extracted": True}) == "m1"
+    assert _entry_message_id("m2") == "m2"  # legacy bare doc_id
+
+
+def test_entry_extracted_defaults_false_for_legacy() -> None:
+    """extracted reads the flag; legacy strings / missing flag count as False."""
+    assert _entry_extracted({"message-id": "m", "extracted": True}) is True
+    assert _entry_extracted({"message-id": "m", "extracted": False}) is False
+    assert _entry_extracted({"message-id": "m"}) is False  # flag absent
+    assert _entry_extracted("m") is False  # legacy bare string
+
+
+def test_uid_already_stored() -> None:
+    """A uid is 'stored' if its own flag is set or a sibling holds its message-id."""
+    mids: set[str] = {"sib"}
+    assert _uid_already_stored(None, mids) is False  # unknown uid must be fetched
+    assert _uid_already_stored({"message-id": "x", "extracted": True}, mids) is True
+    assert _uid_already_stored({"message-id": "sib", "extracted": False}, mids) is True
+    assert _uid_already_stored({"message-id": "y", "extracted": False}, mids) is False
+
+
+def test_run_rejects_unknown_option() -> None:
+    """A mistyped option key (e.g. limit=1 for count=1) fails loudly, not silently."""
+    from rag.extract.plugins.email import EmailExtractor
+
+    # Validation happens before any store/config use, so the args can be dummies.
+    with pytest.raises(PluginError, match="unknown option"):
+        EmailExtractor().run(None, None, {}, None, limit="1")  # type: ignore[arg-type]
+
+
+def test_run_accepts_known_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recognised option keys pass the up-front validation."""
+    from rag.extract.plugins.email import EmailExtractor
+
+    # Stub out the account loading so we stop right after validation succeeds.
+    import rag.extract.plugins.email as email_pkg
+
+    monkeypatch.setattr(email_pkg, "_accounts_from_config", lambda config: [])
+    # No PluginError => the known keys were accepted (empty account list = no work).
+    EmailExtractor().run(None, None, {}, None, count="1", folder="INBOX")  # type: ignore[arg-type]
+
+
+def test_demote_siblings_clears_other_holders_across_folders() -> None:
+    """Promoting one uid demotes every other copy of its message-id in the account."""
+    working = {"7": {"message-id": "m", "extracted": True}}  # just-promoted, in Sent
+    folders_state = {
+        "Sent": {"uidvalidity": 1, "uids": working},
+        "Archive": {"uidvalidity": 1, "uids": {
+            "3": {"message-id": "m", "extracted": True},  # stale sibling -> demote
+            "4": {"message-id": "other", "extracted": True},  # unrelated -> keep
+        }},
+    }
+    _demote_siblings(folders_state, working, "Sent", "7", "m")
+    assert working["7"]["extracted"] is True  # kept
+    assert folders_state["Archive"]["uids"]["3"]["extracted"] is False  # demoted
+    assert folders_state["Archive"]["uids"]["4"]["extracted"] is True  # untouched

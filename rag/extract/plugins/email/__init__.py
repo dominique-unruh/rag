@@ -24,15 +24,31 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, quote_plus
 
-from ....errors import ConfigError
+from ....errors import ConfigError, PluginError
 from ....interrupt import interrupt_requested
 from ....secrets import Secrets
 from ....timestamps import format_timestamp
 from ...base import Extractor, Store
-from .imap import _SECRETS_SUBDIR, _load_uidmap, _truthy, extract_account, run_deletions
+from .imap import (
+    _SECRETS_SUBDIR,
+    _entry_message_id,
+    _load_uidmap,
+    _truthy,
+    extract_account,
+    run_deletions,
+)
 
 # MIME type recorded for the raw email blobs.
 _EMAIL_MIME: str = "message/rfc822"
+
+# Every option key the email extractor accepts. A key=value token outside this
+# set is rejected (a typo like ``limit=1`` instead of ``count=1`` would otherwise
+# be silently ignored, changing behaviour with no warning). ``verbose`` is the
+# reserved flag the CLI injects from ``-v``; the rest are user-facing.
+_USER_OPTIONS: tuple[str, ...] = (
+    "since", "until", "count", "folder", "account", "full", "delete",
+)
+_KNOWN_OPTIONS: frozenset[str] = frozenset(_USER_OPTIONS) | {"verbose"}
 
 # Base URL for mail-link source links (the part before the '#'; the mail-link
 # format leaves it unspecified). See
@@ -232,7 +248,8 @@ class EmailExtractor(Extractor):
         Honours the ``account`` option to restrict to a single account; all other
         options (``since``/``until``/``count``/``folder``) are passed through to
         the per-account sync. Delegates the IMAP work to
-        :func:`~rag.extract.plugins.email.imap.extract_account`.
+        :func:`~rag.extract.plugins.email.imap.extract_account`. An unrecognised
+        option key raises :class:`PluginError` rather than being ignored.
 
         With ``delete=true`` this instead runs the opt-in cross-account deletion
         pass (:func:`~rag.extract.plugins.email.imap.run_deletions`): it scans
@@ -241,6 +258,14 @@ class EmailExtractor(Extractor):
         (it connects to all accounts) and inherently global, so it ignores the
         ``account``/``folder``/``count`` filters.
         """
+        # Reject unrecognised options up front so a mistyped key (e.g. ``limit=1``
+        # for ``count=1``) fails loudly instead of being silently ignored.
+        unknown = sorted(set(options) - _KNOWN_OPTIONS)
+        if unknown:
+            raise PluginError(
+                f"unknown option(s): {', '.join(unknown)}. "
+                f"Recognised options: {', '.join(_USER_OPTIONS)}."
+            )
         accounts = _accounts_from_config(config)
         # Opt-in deletion pass: expensive + global, handled entirely separately
         # from the normal additive sync.
@@ -297,7 +322,9 @@ class EmailExtractor(Extractor):
             for folder_entry in folders.values():
                 uids = folder_entry.get("uids", {})
                 account_uids += len(uids)
-                all_message_ids.update(uids.values())
+                # Entries are {"message-id", "extracted"} objects (or legacy bare
+                # doc_id strings); _entry_message_id reads both shapes.
+                all_message_ids.update(_entry_message_id(e) for e in uids.values())
             total_uids += account_uids
             accounts_stats[account_id] = {"folders": len(folders), "tracked_uids": account_uids}
         # Count accounts with a persisted OAuth2 refresh token (one file each).

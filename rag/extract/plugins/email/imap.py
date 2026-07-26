@@ -1,10 +1,13 @@
 """IMAP connection, sync-state bookkeeping and message reconciliation (PLAN §4.4).
 
 Separated from the plugin entry point so the pure parsing helpers in the parent
-package stay import-light and testable. The sync state (per-folder
-``UIDVALIDITY`` + a map of seen ``UID`` -> ``doc_id``) lives as one JSON file per
-account under the plugin's private ``state_dir``, letting each run cheaply detect
-new and deleted messages.
+package stay import-light and testable. The sync state — the **presence file**,
+one joint JSON shared by all accounts under the plugin's private ``state_dir`` —
+maps, per account+folder, each seen ``UID`` to ``{"message-id", "extracted"}``:
+``message-id`` is the document identity (``doc_id``) and ``extracted`` flags which
+single uid-version's bytes are the copy currently stored for that message-id. This
+lets each run cheaply detect new and deleted messages. See ``doc/extraction.md``
+for the full format and its invariants.
 """
 
 from __future__ import annotations
@@ -162,10 +165,15 @@ def _load_uidmap(state_dir: Path) -> dict[str, Any]:
     """Load the joint UID→message-id map for all accounts.
 
     Shape: ``{"accounts": {<account_id>: {"folders": {<folder>: {"uidvalidity":
-    int, "uids": {<uid>: <doc_id>}}}}}}``. Returns an empty skeleton when the file
-    is absent, first migrating any legacy per-account state files (the previous
-    ``<account_id>.json`` format) so a switch to the joint map does not force a
-    full re-download.
+    int, "uids": {<uid>: {"message-id": <doc_id>, "extracted": bool}}}}}}}``.
+    Returns an empty skeleton when the file is absent, first migrating any legacy
+    per-account state files (the previous ``<account_id>.json`` format) so a switch
+    to the joint map does not force a full re-download.
+
+    Very old files store each uid as a bare ``<doc_id>`` string instead of the
+    ``{"message-id", "extracted"}`` object; :func:`_entry_message_id` /
+    :func:`_entry_extracted` still read that shape, and a normal extract rewrites
+    such entries into the object form.
     """
     path = _uidmap_path(state_dir)
     if path.exists():
@@ -200,6 +208,66 @@ def _account_folders(uidmap: dict[str, Any], account_id: str) -> dict[str, Any]:
     accounts: dict[str, Any] = uidmap.setdefault("accounts", {})
     account: dict[str, Any] = accounts.setdefault(account_id, {})
     return account.setdefault("folders", {})
+
+
+def _entry_message_id(entry: Any) -> str:
+    """Return the message-id (``doc_id``) of a ``uids`` map entry.
+
+    Reads both the current object shape ``{"message-id", "extracted"}`` and the
+    legacy bare-``doc_id`` string, so old presence files load without migration.
+    """
+    # New shape carries the id under "message-id"; a legacy value *is* the id.
+    return str(entry["message-id"]) if isinstance(entry, Mapping) else str(entry)
+
+
+def _entry_extracted(entry: Any) -> bool:
+    """Return whether this uid's bytes are the stored version for its message-id.
+
+    A missing flag / legacy bare-string entry counts as ``False``; a normal extract
+    re-fetches such a uid and re-writes it with the flag set.
+    """
+    # Absent flag / legacy string => not (yet) known to be the stored copy.
+    return bool(entry.get("extracted")) if isinstance(entry, Mapping) else False
+
+
+def _uid_already_stored(entry: Any | None, extracted_mids: set[str]) -> bool:
+    """Return whether a candidate uid's message is already in the store.
+
+    True when the uid's own entry is flagged ``extracted``, or a sibling uid with
+    the same message-id has been stored (``extracted_mids``, tracked account-wide).
+    A uid with no entry (unknown message-id) is never "already stored".
+    """
+    if entry is None:
+        # Never-seen uid: its message-id is unknown, so it must be fetched.
+        return False
+    # Own copy stored, or some sibling already holds this message-id.
+    return _entry_extracted(entry) or _entry_message_id(entry) in extracted_mids
+
+
+def _demote_siblings(
+    folders_state: Mapping[str, Any],
+    working: Mapping[str, Any],
+    working_folder: str,
+    keep_uid: str,
+    doc_id: str,
+) -> None:
+    """Clear ``extracted`` on every *other* uid in this account holding ``doc_id``.
+
+    Maintains invariant 2 after an upsert promotes ``keep_uid`` to the stored
+    version: any prior holder of the same message-id (e.g. a stale ``True`` left in
+    a folder not re-synced this run) is demoted to ``False``. ``working`` is the
+    live ``uids`` dict for ``working_folder`` (not yet written back into
+    ``folders_state``), so it is scanned in place of the stored copy.
+    """
+    for folder, folder_entry in folders_state.items():
+        # Use the in-progress working map for the current folder, stored maps else.
+        uids: Mapping[str, Any] = working if folder == working_folder else folder_entry.get("uids", {})
+        for key, entry in uids.items():
+            # Skip the just-promoted uid; demote any other copy of this message-id.
+            if key == keep_uid and folder == working_folder:
+                continue
+            if isinstance(entry, dict) and _entry_extracted(entry) and _entry_message_id(entry) == doc_id:
+                entry["extracted"] = False
 
 
 def _open_client(
@@ -463,6 +531,16 @@ def extract_account(
         # The joint UID map holds every account; grab this account's sub-map.
         uidmap = _load_uidmap(state_dir)
         folders_state = _account_folders(uidmap, account_id)
+        # Message-ids already stored anywhere in this account, so a duplicate in
+        # another folder is not re-downloaded. ``full`` starts empty on purpose:
+        # it re-fetches and re-stores every in-scope message (dedup still applies
+        # within the run so each message-id is stored just once).
+        extracted_mids: set[str] = set()
+        if not full:
+            for folder_entry in folders_state.values():
+                for entry in folder_entry.get("uids", {}).values():
+                    if _entry_extracted(entry):
+                        extracted_mids.add(_entry_message_id(entry))
         for folder in _list_folders(client, account, folder_option):
             # Read-only select: we never modify the mailbox.
             typ, dat = client.select(_quote(folder), readonly=True)
@@ -484,6 +562,7 @@ def extract_account(
                 since=since,
                 until=until,
                 remaining=remaining,
+                extracted_mids=extracted_mids,
                 full=full,
                 verbose=verbose,
             )
@@ -519,41 +598,50 @@ def _sync_folder(
     since: datetime | None,
     until: datetime | None,
     remaining: int | None,
+    extracted_mids: set[str],
     full: bool = False,
     verbose: bool = False,
 ) -> int | None:
-    """Add previously-unseen messages in ``folder``; return the updated budget.
+    """Add not-yet-stored messages in ``folder``; return the updated budget.
 
-    Fetches only UIDs not already in the joint map (or every UID when ``full``),
-    upserts each and records its ``uid -> doc_id`` in ``folders_state`` in place.
-    **Never deletes** — a vanished UID may just be a move, so removal is left to
-    the cross-account :func:`run_deletions` pass. When ``verbose``, prints a
-    one-liner per extracted message.
+    Fetches only UIDs whose message-id is not already extracted (this uid, or a
+    sibling uid sharing the message-id — tracked account-wide in ``extracted_mids``;
+    or every UID when ``full``), upserts each, and records its
+    ``uid -> {"message-id", "extracted"}`` entry in ``folders_state`` in place. Each
+    stored message-id updates ``extracted_mids`` and demotes any sibling so at most
+    one uid stays ``extracted`` (invariant 2). **Never deletes** — a vanished UID may
+    just be a move, so removal is left to the cross-account :func:`run_deletions`
+    pass. When ``verbose``, prints a one-liner per stored message.
     """
     from . import build_stable_metadata, build_transient_metadata  # avoid import cycle
 
     prior = folders_state.get(folder)
-    # known maps str(uid) -> doc_id for messages we have already extracted.
+    # known maps str(uid) -> {"message-id", "extracted"} for this folder.
     # ``full`` deliberately ignores the stored UID memory and re-fetches all.
     if not full and prior is not None and int(prior.get("uidvalidity", 0)) == validity:
-        known: dict[str, str] = dict(prior.get("uids", {}))
+        known: dict[str, Any] = dict(prior.get("uids", {}))
     else:
         # Full pass, new folder, or reset UID space: discard the stale UID map.
         known = {}
 
-    # Candidate UIDs, filtered by the date window. Only fetch UIDs we have not
-    # seen before: an already-known message is not re-processed when nothing
-    # changed IMAP-side. (New mail = new UID; deletions are handled separately.)
+    # Candidate UIDs, filtered by the date window. A uid needs fetching unless its
+    # message-id is already stored — either this uid is flagged ``extracted`` or a
+    # sibling with the same message-id is (``extracted_mids``). A message-id not yet
+    # extracted anywhere is fetched even if the uid is already recorded. (New mail =
+    # new UID; deletions are handled separately.)
     candidates = _search_uids(client, since=since, until=until)
-    unknown = [u for u in candidates if str(u) not in known]
+    to_fetch = [
+        u for u in candidates
+        if not _uid_already_stored(known.get(str(u)), extracted_mids)
+    ]
     if verbose:
         # Per-folder summary so an empty run is explainable.
         print(
-            f"[{folder}] {len(candidates)} in window, {len(known)} known, "
-            f"{len(unknown)} new",
+            f"[{folder}] {len(candidates)} in window, {len(candidates) - len(to_fetch)} "
+            f"stored, {len(to_fetch)} to fetch",
             file=sys.stderr,
         )
-    for uid in unknown:
+    for uid in to_fetch:
         if remaining is not None and remaining <= 0:
             # Budget exhausted; stop fetching but keep the state gathered so far.
             break
@@ -568,21 +656,30 @@ def _sync_folder(
         raw, is_read = fetched
         doc_id, parsed = _message_id(raw, validity, uid)
         # Guard: refuse to persist bytes that are not a real email (e.g. garbage
-        # from a desynced IMAP connection). Mark the UID seen so it is not
-        # re-fetched, and skip without consuming the fetch budget.
+        # from a desynced IMAP connection). Flag the UID ``extracted`` so it is not
+        # re-fetched (its id is unique to this uid, so no real document is implied),
+        # and skip without consuming the fetch budget.
         if not _looks_like_email(parsed):
             print(
                 f"warning: UID {uid} in [{folder}] is not a parseable email; skipping",
                 file=sys.stderr,
             )
-            known[str(uid)] = doc_id
+            known[str(uid)] = {"message-id": doc_id, "extracted": True}
+            continue
+        # A brand-new uid only reveals its message-id on fetch: if a sibling already
+        # holds it, record the uid but skip the redundant upsert (invariant 2).
+        if doc_id in extracted_mids:
+            known[str(uid)] = {"message-id": doc_id, "extracted": False}
             continue
         # Build both metadata sets and upsert. Duplicate message-ids are fine
         # (exist_ok default True); an unchanged body just refreshes transient.
         stable = build_stable_metadata(parsed)
         transient = build_transient_metadata(folder, account_id, read=is_read)
         result = store.upsert(doc_id, raw, stable, transient=transient)
-        known[str(uid)] = doc_id
+        known[str(uid)] = {"message-id": doc_id, "extracted": True}
+        # This uid is now the stored version: record it and demote any sibling.
+        extracted_mids.add(doc_id)
+        _demote_siblings(folders_state, known, folder, str(uid), doc_id)
         if verbose:
             # Format the message date as DD-Mon-YYYY (missing/unparseable -> "?").
             date_iso = stable.get("date", "")
@@ -608,11 +705,13 @@ def _scan_account_uids(
 ) -> bool:
     """Refresh ``folders_state`` from the server for one account's included folders.
 
-    For every included folder, rebuilds ``uid -> doc_id`` from the server's live
-    UID set, reusing message-ids already in the map and fetching just the
-    ``Message-ID`` header for unknown UIDs. Returns ``False`` if a graceful
-    interrupt was requested (the caller must then abort without deleting, since
-    the scan is incomplete); ``True`` when the account was fully scanned.
+    For every included folder, rebuilds the ``uid -> {"message-id", "extracted"}``
+    map from the server's live UID set, reusing entries already in the map (so their
+    ``extracted`` flags carry forward) and fetching just the ``Message-ID`` header
+    for unknown UIDs (recorded ``extracted:false`` — this scan stores no bodies).
+    Returns ``False`` if a graceful interrupt was requested (the caller must then
+    abort without deleting, since the scan is incomplete); ``True`` when the account
+    was fully scanned.
 
     Safety: a folder that reports messages (EXISTS > 0) but returns an empty
     search is treated as a glitch — its prior entries are kept rather than being
@@ -638,28 +737,35 @@ def _scan_account_uids(
                 file=sys.stderr,
             )
             continue
-        # Reuse message-ids we already know for this epoch; only unknowns cost a fetch.
+        # Reuse entries we already know for this epoch; only unknowns cost a fetch.
         prior = folders_state.get(folder)
-        prior_uids: dict[str, str] = (
+        prior_uids: dict[str, Any] = (
             dict(prior.get("uids", {}))
             if prior is not None and int(prior.get("uidvalidity", 0)) == validity
             else {}
         )
-        fresh: dict[str, str] = {}
+        fresh: dict[str, Any] = {}
         for uid in all_uids:
             # Between folders is a safe checkpoint; abort mid-folder without
             # committing partial results (prior entry stays intact).
             if interrupt_requested():
                 return False
             key = str(uid)
-            doc_id = prior_uids.get(key)
+            prev = prior_uids.get(key)
+            if prev is not None:
+                # Known uid: keep its identity and carry the extracted flag forward.
+                fresh[key] = {
+                    "message-id": _entry_message_id(prev),
+                    "extracted": _entry_extracted(prev),
+                }
+                continue
+            # Unknown UID: resolve its identity via a cheap header-only fetch. The
+            # scan stores no bodies, so it is recorded not-extracted.
+            doc_id = _fetch_msgid(client, uid, validity)
             if doc_id is None:
-                # Unknown UID: resolve its identity via a cheap header-only fetch.
-                doc_id = _fetch_msgid(client, uid, validity)
-                if doc_id is None:
-                    # Fetch failed (vanished mid-scan) — leave it out of presence.
-                    continue
-            fresh[key] = doc_id
+                # Fetch failed (vanished mid-scan) — leave it out of presence.
+                continue
+            fresh[key] = {"message-id": doc_id, "extracted": False}
         folders_state[folder] = {"uidvalidity": validity, "uids": fresh}
         if verbose:
             print(f"[{account_id}/{folder}] scanned {len(fresh)} message(s)", file=sys.stderr)
@@ -734,10 +840,15 @@ def run_deletions(
             return
 
     # Presence = every message-id currently mapped across all accounts/folders.
+    # Decided on message-ids alone (never the ``extracted`` flag), so corrupt flags
+    # cannot cause a wrong deletion (invariant 5).
     present: set[str] = set()
     for account_entry in uidmap.get("accounts", {}).values():
         for folder_entry in account_entry.get("folders", {}).values():
-            present.update(folder_entry.get("uids", {}).values())
+            present.update(
+                _entry_message_id(entry)
+                for entry in folder_entry.get("uids", {}).values()
+            )
 
     # Delete any stored document whose id survives in no folder of any account.
     deleted = 0

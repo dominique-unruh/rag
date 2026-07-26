@@ -186,25 +186,71 @@ Extracts email from one or more IMAP accounts.
 - **Blob** = the full raw email in RFC 5322 format, headers included.
 - **Stable / transient metadata**: see [metadata.md](metadata.md).
 
-**State dir**: stores a single **joint UID map** (`uidmap.json`) shared by *all*
-accounts — for each account+folder, the `UIDVALIDITY` plus a `uid -> message-id`
-map. A normal run is **additive only**: it fetches messages whose UID is not yet in
-the map and refreshes the map. It never deletes, because a UID vanishing from one
-folder may just be a **move** to another folder/account under the same message-id —
-and identity (`doc_id`) is the message-id, shared across all accounts.
+**State dir — the presence file** (`uidmap.json`, one joint file shared by *all*
+accounts). For each account+folder it stores the `UIDVALIDITY` and a
+`uid -> {"message-id", "extracted"}` map:
 
-**Deletion (`delete=true`)**: an opt-in, expensive pass reconciles removals, kept
-plugin-internal. It refreshes the joint map by scanning **every** account's
-included folders (resolving any unknown UID via a cheap Message-ID-only header
-fetch), then deletes every document whose message-id is a live UID **nowhere**
-across all accounts. Deletion is thus by **global presence** (delete only when the
-last holder is gone), not per-folder — so a move between folders or servers never
-looks like a deletion, and a message duplicated on two servers survives until
-removed from both. This subsumes an excluded-folder purge: a message that lives
-only in an `exclude_folders` folder is absent from the map and so is deleted.
-Conservative on failure: an unreachable account keeps its prior map entries (its
-documents stay present), and an interrupted scan deletes nothing. `delete=true` is
-a standalone, global mode and rejects the additive options below.
+```json
+{"accounts": {"<account-id>": {"folders": {"<folder>": {
+  "uidvalidity": 12345,
+  "uids": {"<uid>": {"message-id": "<doc_id>", "extracted": true}}}}}}}
+```
+
+`message-id` is the document identity (`doc_id`, shared across accounts); `extracted`
+records whether **this uid's bytes** are the version currently stored for that
+message-id. A message-id can appear under several uids (same message in several
+folders/accounts), but only **one** copy is ever stored, so at most one of those
+uids is `extracted:true`.
+
+**Invariants** — each chosen so a stale or partial file degrades safely, never
+destructively:
+
+1. **Incomplete by design.** The file lists only uids some past pass has seen. A
+   message-id / folder / account not in it means "not yet observed", never "gone".
+   An additive run only touches the folders it actually swept.
+2. **At most one `extracted:true` per message-id.** Exactly one document is stored
+   per message-id; the flag marks which uid-version fills it. Every other uid
+   sharing that message-id is `false`.
+3. **`extracted:true` ⟹ the document exists** for that message-id (best-effort;
+   self-heals by re-download if the store was wiped underneath the file).
+4. **Extract fails safe.** A wrong or missing flag at worst makes extract re-fetch a
+   message it already has — `upsert` is idempotent, so never corruption or loss.
+5. **Delete ignores the flag.** Deletion decides purely on **message-id presence**
+   (server message-ids vs. the file's, after a complete refresh). Even fully corrupt
+   flags cannot cause a wrong deletion — only a wrong *message-id set* could, and the
+   delete pass rebuilds that set in full before deciding.
+
+**Extract (additive sync).** For each in-scope folder, over the uids the server
+returns for the (optionally date-restricted) query:
+- A uid is a **download candidate** unless the file already records its message-id as
+  extracted — i.e. this uid is `extracted:true`, or a sibling uid with the same
+  message-id is. Already-extracted message-ids are skipped without a fetch.
+- On download: fetch → resolve message-id → `upsert`; set this uid `extracted:true`
+  and flip any sibling with the same message-id to `false` (invariant 2). If the
+  fetch reveals the message-id was already extracted elsewhere, record the uid
+  `extracted:false` and skip the redundant `upsert`.
+- Newly-seen uids are added; **completeness is never assumed** — folders not visited
+  this run keep their existing entries.
+- `full=1` starts from an empty extracted-set, so every in-scope message is re-fetched
+  and re-stored (still bounded by `count`).
+
+**Deletion (`delete=true`)** — an opt-in, expensive, plugin-internal pass, in two
+ordered phases:
+1. **Refresh the file completely** — scan **every** account's included folders and
+   record all live `uid -> message-id` pairs (resolving an unknown uid via a cheap
+   Message-ID-only header fetch). Existing `extracted` flags are carried forward;
+   newly-seen uids get `extracted:false`. This phase stores no bodies, so it never
+   sets a flag `true`.
+2. **Reconcile** — delete every stored document whose message-id is a live uid
+   **nowhere** across all accounts. Deletion is thus by **global presence** (delete
+   only when the last holder is gone), not per-folder — so a move between folders or
+   servers never looks like a deletion, and a message duplicated on two servers
+   survives until removed from both. This subsumes an excluded-folder purge: a message
+   living only in an `exclude_folders` folder is absent from the map and so is deleted.
+
+Conservative on failure: an unreachable account keeps its prior entries (its documents
+stay present), and an interrupted scan deletes nothing. `delete=true` is a standalone,
+global mode and rejects the additive options below.
 
 **`run` options**:
 - `since=<timestamp>` — only messages at/after this time.
