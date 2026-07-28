@@ -18,6 +18,7 @@ from rag.extract.plugins.email.imap import (
     _looks_like_email,
     _truthy,
     _uid_already_stored,
+    collect_extracted_mids,
 )
 
 
@@ -238,17 +239,40 @@ def test_run_accepts_known_options(monkeypatch: pytest.MonkeyPatch) -> None:
     EmailExtractor().run(None, None, {}, None, count="1", folder="INBOX")  # type: ignore[arg-type]
 
 
-def test_demote_siblings_clears_other_holders_across_folders() -> None:
-    """Promoting one uid demotes every other copy of its message-id in the account."""
-    working = {"7": {"message-id": "m", "extracted": True}}  # just-promoted, in Sent
-    folders_state = {
-        "Sent": {"uidvalidity": 1, "uids": working},
-        "Archive": {"uidvalidity": 1, "uids": {
-            "3": {"message-id": "m", "extracted": True},  # stale sibling -> demote
-            "4": {"message-id": "other", "extracted": True},  # unrelated -> keep
+def test_demote_siblings_clears_other_holders_across_folders_and_accounts() -> None:
+    """Promoting one uid demotes every other copy of its message-id, any account."""
+    working = {"7": {"message-id": "m", "extracted": True}}  # just-promoted, acct A/Sent
+    accounts_state = {
+        "A": {"folders": {
+            "Sent": {"uidvalidity": 1, "uids": working},
+            "Archive": {"uidvalidity": 1, "uids": {
+                "3": {"message-id": "m", "extracted": True},  # stale sibling -> demote
+                "4": {"message-id": "other", "extracted": True},  # unrelated -> keep
+            }},
+        }},
+        "B": {"folders": {
+            # Same message-id in a *different* account: must also be demoted.
+            "INBOX": {"uidvalidity": 9, "uids": {
+                "7": {"message-id": "m", "extracted": True},  # same uid#, other acct
+            }},
         }},
     }
-    _demote_siblings(folders_state, working, "Sent", "7", "m")
-    assert working["7"]["extracted"] is True  # kept
-    assert folders_state["Archive"]["uids"]["3"]["extracted"] is False  # demoted
-    assert folders_state["Archive"]["uids"]["4"]["extracted"] is True  # untouched
+    _demote_siblings(accounts_state, working, "A", "Sent", "7", "m")
+    assert working["7"]["extracted"] is True  # kept (the promoted copy)
+    assert accounts_state["A"]["folders"]["Archive"]["uids"]["3"]["extracted"] is False
+    assert accounts_state["A"]["folders"]["Archive"]["uids"]["4"]["extracted"] is True
+    assert accounts_state["B"]["folders"]["INBOX"]["uids"]["7"]["extracted"] is False
+
+
+def test_collect_extracted_mids_spans_all_accounts() -> None:
+    """The run-wide extracted set gathers message-ids flagged in every account."""
+    uidmap = {"accounts": {
+        "A": {"folders": {"INBOX": {"uids": {
+            "1": {"message-id": "m1", "extracted": True},
+            "2": {"message-id": "m2", "extracted": False},  # not stored -> excluded
+        }}}},
+        "B": {"folders": {"Sent": {"uids": {
+            "5": {"message-id": "m3", "extracted": True},
+        }}}},
+    }}
+    assert collect_extracted_mids(uidmap) == {"m1", "m3"}

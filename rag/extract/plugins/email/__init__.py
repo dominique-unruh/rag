@@ -38,6 +38,7 @@ from .imap import (
     _load_uidmap,
     _save_uidmap,
     _truthy,
+    collect_extracted_mids,
     extract_account,
     run_deletions,
 )
@@ -304,6 +305,17 @@ class EmailExtractor(Extractor):
         # The count budget is shared across ALL accounts (count=1 means one item
         # total, not one per account). None = unlimited.
         remaining: int | None = int(options["count"]) if options.get("count") is not None else None
+        # Load the joint UID map ONCE and share it (plus the extracted-set) across
+        # every account. Invariant 2 is global — a message-id present in several
+        # accounts must be stored, and flagged extracted, exactly once — so dedup
+        # state cannot be per-account. ``full`` starts from an empty set so every
+        # in-scope message is re-fetched (dedup still applies within the run). Only
+        # loaded when there is work: no accounts => nothing to read from disk.
+        if accounts:
+            uidmap = _load_uidmap(state_dir)
+            extracted_mids: set[str] = (
+                set() if _truthy(options.get("full")) else collect_extracted_mids(uidmap)
+            )
         for account in accounts:
             account_id = str(account["account-id"])
             # Skip accounts the caller filtered out.
@@ -320,6 +332,8 @@ class EmailExtractor(Extractor):
                 secrets=secrets,
                 options=options,
                 remaining=remaining,
+                uidmap=uidmap,
+                extracted_mids=extracted_mids,
             )
             # A graceful interrupt stops the whole run, not just one account.
             if interrupt_requested():

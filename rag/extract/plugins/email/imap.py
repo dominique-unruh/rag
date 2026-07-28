@@ -244,30 +244,59 @@ def _uid_already_stored(entry: Any | None, extracted_mids: set[str]) -> bool:
     return _entry_extracted(entry) or _entry_message_id(entry) in extracted_mids
 
 
+def collect_extracted_mids(uidmap: Mapping[str, Any]) -> set[str]:
+    """Return every message-id flagged ``extracted`` across **all** accounts.
+
+    Invariant 2 is global (one stored copy per message-id, no matter how many
+    accounts carry that message), so the run-wide dedup set is seeded from every
+    account's folders — not just the one being synced. A ``full`` run passes an
+    empty set instead, so every in-scope message is re-fetched and re-stored.
+    """
+    mids: set[str] = set()
+    for account_entry in uidmap.get("accounts", {}).values():
+        folders = account_entry.get("folders", {}) if isinstance(account_entry, dict) else {}
+        for folder_entry in folders.values():
+            for entry in folder_entry.get("uids", {}).values():
+                if _entry_extracted(entry):
+                    mids.add(_entry_message_id(entry))
+    return mids
+
+
 def _demote_siblings(
-    folders_state: Mapping[str, Any],
+    accounts_state: Mapping[str, Any],
     working: Mapping[str, Any],
+    working_account: str,
     working_folder: str,
     keep_uid: str,
     doc_id: str,
 ) -> None:
-    """Clear ``extracted`` on every *other* uid in this account holding ``doc_id``.
+    """Clear ``extracted`` on every *other* uid — in **any** account — holding ``doc_id``.
 
-    Maintains invariant 2 after an upsert promotes ``keep_uid`` to the stored
-    version: any prior holder of the same message-id (e.g. a stale ``True`` left in
-    a folder not re-synced this run) is demoted to ``False``. ``working`` is the
-    live ``uids`` dict for ``working_folder`` (not yet written back into
-    ``folders_state``), so it is scanned in place of the stored copy.
+    Maintains invariant 2 (global: exactly one stored copy per message-id across all
+    accounts) after an upsert promotes ``keep_uid`` to the stored version: any prior
+    holder of the same message-id — another folder, or another account, possibly not
+    re-synced this run — is demoted to ``False``. ``working`` is the live ``uids``
+    dict for ``working_account``/``working_folder`` (not yet written back into
+    ``accounts_state``), so it is scanned in place of the stored copy.
     """
-    for folder, folder_entry in folders_state.items():
-        # Use the in-progress working map for the current folder, stored maps else.
-        uids: Mapping[str, Any] = working if folder == working_folder else folder_entry.get("uids", {})
-        for key, entry in uids.items():
-            # Skip the just-promoted uid; demote any other copy of this message-id.
-            if key == keep_uid and folder == working_folder:
-                continue
-            if isinstance(entry, dict) and _entry_extracted(entry) and _entry_message_id(entry) == doc_id:
-                entry["extracted"] = False
+    for account_id, account_entry in accounts_state.items():
+        folders = account_entry.get("folders", {}) if isinstance(account_entry, dict) else {}
+        for folder, folder_entry in folders.items():
+            # Overlay the in-progress working map for the folder being synced right
+            # now; every other folder/account is read from its persisted map.
+            is_working = account_id == working_account and folder == working_folder
+            uids: Mapping[str, Any] = (
+                working if is_working
+                else (folder_entry.get("uids", {}) if isinstance(folder_entry, dict) else {})
+            )
+            for key, entry in uids.items():
+                # Skip the just-promoted uid; demote any other copy of this message-id.
+                # (uid numbers are unique only per folder, so the skip is scoped to
+                # the working folder+account.)
+                if is_working and key == keep_uid:
+                    continue
+                if isinstance(entry, dict) and _entry_extracted(entry) and _entry_message_id(entry) == doc_id:
+                    entry["extracted"] = False
 
 
 def _open_client(
@@ -505,6 +534,8 @@ def extract_account(
     secrets: Secrets,
     options: Mapping[str, Any],
     remaining: int | None,
+    uidmap: dict[str, Any],
+    extracted_mids: set[str],
 ) -> int | None:
     """Connect to one IMAP account and add new messages into ``store``.
 
@@ -512,6 +543,13 @@ def extract_account(
     (bounded by the shared ``remaining`` fetch budget; ``None`` = unlimited),
     upserts them, and refreshes the account's entries in the joint UID map.
     Returns the leftover budget so it can be threaded across accounts.
+
+    ``uidmap`` and ``extracted_mids`` are **run-scoped and shared across every
+    account** (owned by the caller): a single in-memory joint map and the set of
+    message-ids already stored anywhere. This makes invariant 2 hold *globally* — a
+    message that lands in several accounts is stored, and flagged ``extracted``, by
+    the first account to reach it; later accounts record their uid ``extracted:false``
+    and skip the redundant upsert. The map is persisted after each folder.
 
     Deletions are deliberately *not* handled here: a message-id may live in
     several folders/accounts, so deciding it is truly gone requires scanning
@@ -528,19 +566,8 @@ def extract_account(
 
     client = _open_client(account, state_dir, secrets)
     try:
-        # The joint UID map holds every account; grab this account's sub-map.
-        uidmap = _load_uidmap(state_dir)
+        # Grab this account's sub-map within the shared joint map (all accounts).
         folders_state = _account_folders(uidmap, account_id)
-        # Message-ids already stored anywhere in this account, so a duplicate in
-        # another folder is not re-downloaded. ``full`` starts empty on purpose:
-        # it re-fetches and re-stores every in-scope message (dedup still applies
-        # within the run so each message-id is stored just once).
-        extracted_mids: set[str] = set()
-        if not full:
-            for folder_entry in folders_state.values():
-                for entry in folder_entry.get("uids", {}).values():
-                    if _entry_extracted(entry):
-                        extracted_mids.add(_entry_message_id(entry))
         for folder in _list_folders(client, account, folder_option):
             # Read-only select: we never modify the mailbox.
             typ, dat = client.select(_quote(folder), readonly=True)
@@ -555,6 +582,7 @@ def extract_account(
             remaining = _sync_folder(
                 client=client,
                 store=store,
+                accounts_state=uidmap["accounts"],
                 folders_state=folders_state,
                 account_id=account_id,
                 folder=folder,
@@ -591,6 +619,7 @@ def _sync_folder(
     *,
     client: imaplib.IMAP4,
     store: Store,
+    accounts_state: dict[str, Any],
     folders_state: dict[str, Any],
     account_id: str,
     folder: str,
@@ -605,11 +634,12 @@ def _sync_folder(
     """Add not-yet-stored messages in ``folder``; return the updated budget.
 
     Fetches only UIDs whose message-id is not already extracted (this uid, or a
-    sibling uid sharing the message-id — tracked account-wide in ``extracted_mids``;
-    or every UID when ``full``), upserts each, and records its
+    sibling uid sharing the message-id — tracked run-wide across all accounts in
+    ``extracted_mids``; or every UID when ``full``), upserts each, and records its
     ``uid -> {"message-id", "extracted"}`` entry in ``folders_state`` in place. Each
-    stored message-id updates ``extracted_mids`` and demotes any sibling so at most
-    one uid stays ``extracted`` (invariant 2). **Never deletes** — a vanished UID may
+    stored message-id updates ``extracted_mids`` and demotes any sibling in
+    ``accounts_state`` (any account) so at most one uid stays ``extracted``
+    (invariant 2). **Never deletes** — a vanished UID may
     just be a move, so removal is left to the cross-account :func:`run_deletions`
     pass. When ``verbose``, prints a one-liner per stored message.
     """
@@ -677,9 +707,10 @@ def _sync_folder(
         transient = build_transient_metadata(folder, account_id, read=is_read)
         result = store.upsert(doc_id, raw, stable, transient=transient)
         known[str(uid)] = {"message-id": doc_id, "extracted": True}
-        # This uid is now the stored version: record it and demote any sibling.
+        # This uid is now the stored version: record it and demote any sibling —
+        # including copies of this message-id sitting in other accounts.
         extracted_mids.add(doc_id)
-        _demote_siblings(folders_state, known, folder, str(uid), doc_id)
+        _demote_siblings(accounts_state, known, account_id, folder, str(uid), doc_id)
         if verbose:
             # Format the message date as DD-Mon-YYYY (missing/unparseable -> "?").
             date_iso = stable.get("date", "")
