@@ -56,27 +56,33 @@ shows the label alone.
 
 ## Chat models
 
-Configured under `chat` in the YAML, using the **same two backends** as embedding
+The chat model is described in the top-level **`models:`** section (shared with the
+embedders — see [`embedding.md`](embedding.md)); `chat.default_model` names which id
+to use when `--model` is omitted. It uses the **same two backends** as embedding
 models: native **Ollama** (`/api/chat`) or an **OpenAI-compatible** endpoint
 (`/chat/completions`). Both are streamed with the standard library (no extra
 dependency), mirroring `rag/embed/backends.py`. An OpenAI-compatible API key, if
 needed, is resolved through the keyring (`api_key_name`), never from the YAML.
 
 ```yaml
+models:
+  qwen2.5-7b:
+    backend: ollama           # or: openai
+    host: http://localhost:11434   # ollama; use api_base for an openai endpoint
+    model: qwen2.5:7b-instruct
+    num_ctx: 8192             # ollama context window (tokens)
+    temperature: 0.2
+    timeout: 600              # generous — CPU generation is slow
+    # api_key_name: <secret>  # openai backend only; resolved via keyring
+
 chat:
-  default_model: qwen2.5-7b     # used when --model is omitted
+  default_model: qwen2.5-7b     # id from `models:`; used when --model is omitted
   retrieval:
     top_k: 8                    # chunks fed to the model per turn (override: --top-k)
-  models:
-    - id: qwen2.5-7b
-      backend: ollama           # or: openai
-      host: http://localhost:11434   # ollama; use api_base for an openai endpoint
-      model: qwen2.5:7b-instruct
-      num_ctx: 8192             # ollama context window (tokens)
-      temperature: 0.2
-      timeout: 600              # generous — CPU generation is slow
-      # api_key_name: <secret>  # openai backend only; resolved via keyring
 ```
+
+`--model` can name **any** id in `models:` (parsed as a chat model — a non-chat
+backend like `bm25` is rejected).
 
 **Local CPU default.** On a CPU-only box with 32 GB RAM, a 7B instruct model (e.g.
 `qwen2.5:7b-instruct`, ~5 GB at Q4, multilingual for DE/EN mail) runs comfortably

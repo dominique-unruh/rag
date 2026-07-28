@@ -15,7 +15,7 @@ from rag.chat.llm import (
     _openai_body,
     _openai_delta,
 )
-from rag.chat.models import ChatModelSpec, get_chat_model, load_chat_models, retrieval_top_k
+from rag.chat.models import ChatModelSpec, get_chat_model, retrieval_top_k
 from rag.chat.prompt import build_user_message, format_context, system_prompt
 from rag.chat.retrieve import RetrievedChunk, _chunk_at, rrf_fuse
 from rag.chat.terminal import cited_indices, hyperlink
@@ -26,27 +26,27 @@ from rag.errors import ConfigError
 # --- chat model registry -------------------------------------------------
 
 
-def _chat_config(**overrides: object) -> dict:
-    """Return a minimal config raw mapping with a ``chat`` section."""
-    chat = {
-        "default_model": "local",
-        "models": [
-            {"id": "local", "backend": "ollama", "host": "http://x:11434", "model": "m"}
-        ],
+def _chat_config(**chat_overrides: object) -> dict:
+    """Return a minimal config raw mapping: a top-level ``models:`` + ``chat`` section."""
+    raw = {
+        "models": {"local": {"backend": "ollama", "host": "http://x:11434", "model": "m"}},
+        "chat": {"default_model": "local"},
     }
-    chat.update(overrides)
-    return {"chat": chat}
+    raw["chat"].update(chat_overrides)
+    return raw
 
 
-def test_load_chat_models_parses_entry() -> None:
-    """A configured chat model is parsed into a ChatModelSpec with its knobs."""
-    raw = {"chat": {"models": [{
-        "id": "q", "backend": "ollama", "host": "http://h:1", "model": "qwen",
-        "num_ctx": 4096, "temperature": 0.3, "max_tokens": 256,
-    }]}}
-    models = load_chat_models(raw)
-    assert set(models) == {"q"}
-    spec = models["q"]
+def test_get_chat_model_parses_block() -> None:
+    """A referenced model block is parsed into a ChatModelSpec with its knobs."""
+    raw = {
+        "models": {"q": {
+            "backend": "ollama", "host": "http://h:1", "model": "qwen",
+            "num_ctx": 4096, "temperature": 0.3, "max_tokens": 256,
+        }},
+        "chat": {"default_model": "q"},
+    }
+    spec = get_chat_model(raw, None)
+    assert spec.id == "q"
     assert (spec.backend, spec.model, spec.num_ctx, spec.max_tokens) == ("ollama", "qwen", 4096, 256)
     assert spec.temperature == 0.3
 
@@ -59,16 +59,16 @@ def test_get_chat_model_uses_default() -> None:
 
 def test_get_chat_model_single_model_no_default() -> None:
     """A lone configured model is used even without an explicit default."""
-    raw = {"chat": {"models": [{"id": "solo", "backend": "ollama", "host": "h", "model": "m"}]}}
+    raw = {"models": {"solo": {"backend": "ollama", "host": "h", "model": "m"}}, "chat": {}}
     assert get_chat_model(raw, None).id == "solo"
 
 
 def test_get_chat_model_ambiguous_without_default() -> None:
     """Several models and no default => an actionable ConfigError."""
-    raw = {"chat": {"models": [
-        {"id": "a", "backend": "ollama", "host": "h", "model": "m"},
-        {"id": "b", "backend": "ollama", "host": "h", "model": "m"},
-    ]}}
+    raw = {"models": {
+        "a": {"backend": "ollama", "host": "h", "model": "m"},
+        "b": {"backend": "ollama", "host": "h", "model": "m"},
+    }, "chat": {}}
     with pytest.raises(ConfigError):
         get_chat_model(raw, None)
 
@@ -80,15 +80,16 @@ def test_get_chat_model_unknown_id() -> None:
 
 
 def test_get_chat_model_none_configured() -> None:
-    """No chat section at all is a clear ConfigError."""
+    """No models section at all is a clear ConfigError."""
     with pytest.raises(ConfigError):
         get_chat_model({}, None)
 
 
 def test_bad_backend_rejected() -> None:
-    """An unsupported backend fails loudly."""
+    """An unsupported backend fails loudly when the block is parsed as chat."""
+    raw = {"models": {"x": {"backend": "bogus", "model": "m"}}, "chat": {"default_model": "x"}}
     with pytest.raises(ConfigError):
-        load_chat_models({"chat": {"models": [{"id": "x", "backend": "bogus", "model": "m"}]}})
+        get_chat_model(raw, None)
 
 
 def test_retrieval_top_k_default_and_override() -> None:

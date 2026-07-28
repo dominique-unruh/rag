@@ -7,11 +7,14 @@ for hybrid retrieval, or an old and a new dense model during a migration).
 
 ## Multiple models, one index each
 
-- A **model registry** (in config) lists the enabled embedding models. Each entry
-  has: a stable **model id** (treated like a version — changing the model or its
-  parameters means a *new* id), a **type** (`dense` / `sparse`), a **backend**, the
-  index/collection name, and for dense models the dimension + metric + any query
-  instruction template.
+- All models are described once in the top-level **`models:`** config section, keyed
+  by **model id** (treated like a version — changing the model or its parameters
+  means a *new* id). **`embedding.models`** is then just the list of ids to embed
+  with. Each referenced block has: a **type** (`dense` / `sparse`), a **backend**,
+  the index/collection name, and for dense models the dimension + metric + any query
+  instruction template. (The block is untyped in `models:`; the referencing section
+  decides how to read it, so the same registry also holds the chat model — see
+  [`chat.md`](chat.md).)
 - The **backend** selects how the model is reached:
   - `openai` — any OpenAI-compatible embeddings endpoint (`api_base` + optional api
     key from secrets); covers hosted providers and local servers including Ollama's

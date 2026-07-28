@@ -129,7 +129,7 @@ def _build_parser() -> argparse.ArgumentParser:
     chat = subparsers.add_parser("chat", help="chat over the RAG (retrieval-augmented)")
     chat.add_argument(
         "--model", dest="model",
-        help="chat model id (from config chat.models; default: chat.default_model)",
+        help="chat model id (from the config 'models' section; default: chat.default_model)",
     )
     chat.add_argument(
         "--mode", choices=["simple"], default="simple",

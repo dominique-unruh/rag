@@ -1,10 +1,11 @@
 """Chat LLM registry (PLAN §7).
 
-Parses the ``chat`` config section into :class:`ChatModelSpec`s. A chat model uses
-the same transport options as an embedding model (see :mod:`rag.embed.models`): an
-**OpenAI-compatible** endpoint or a **native Ollama** server. Unlike an embedder,
-a chat model additionally carries generation knobs (context window, temperature,
-token cap).
+Parses a model block from the top-level ``models:`` section (see :mod:`rag.models`)
+into a :class:`ChatModelSpec`; ``chat.default_model`` names which id to use by
+default. A chat model uses the same transport options as an embedding model (see
+:mod:`rag.embed.models`): an **OpenAI-compatible** endpoint or a **native Ollama**
+server. Unlike an embedder, a chat model additionally carries generation knobs
+(context window, temperature, token cap).
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..errors import ConfigError
+from ..models import model_block, models_section
 
 # Allowed chat backends (same two transports as the dense embedding backends).
 _CHAT_BACKENDS: frozenset[str] = frozenset({"openai", "ollama"})
@@ -102,49 +104,33 @@ def _parse_model(entry: Mapping[str, Any]) -> ChatModelSpec:
     )
 
 
-def load_chat_models(config_raw: Mapping[str, Any]) -> dict[str, ChatModelSpec]:
-    """Return all configured chat models keyed by id (empty if the section is absent)."""
-    section = _chat_section(config_raw)
-    entries = section.get("models", [])
-    if not isinstance(entries, list):
-        raise ConfigError("chat.models must be a list")
-    models: dict[str, ChatModelSpec] = {}
-    for entry in entries:
-        if not isinstance(entry, Mapping):
-            raise ConfigError("each chat model must be a mapping")
-        spec = _parse_model(entry)
-        models[spec.id] = spec
-    return models
-
-
 def get_chat_model(config_raw: Mapping[str, Any], model_id: str | None) -> ChatModelSpec:
     """Return the :class:`ChatModelSpec` for ``model_id`` (or the configured default).
 
-    With ``model_id`` ``None`` uses ``chat.default_model``; if that is also unset
-    and exactly one model is configured, that one is used. Raises
+    ``model_id`` is a model id from the top-level ``models:`` section. With ``None``
+    it falls back to ``chat.default_model``; if that is also unset and exactly one
+    model is defined, that one is used. The referenced block is parsed as a chat
+    model — a non-chat backend (e.g. a ``bm25`` embedder) is rejected here. Raises
     :class:`ConfigError` on an unknown/ambiguous/absent selection.
     """
-    models = load_chat_models(config_raw)
-    if not models:
-        raise ConfigError(
-            "no chat models configured; add a 'chat.models' entry to config.yaml"
-        )
     if model_id is None:
-        # Fall back to the explicit default, then to the sole model if unambiguous.
+        # Prefer the explicit default; else the sole model when unambiguous.
         default = _chat_section(config_raw).get("default_model")
         if default is not None:
             model_id = str(default)
-        elif len(models) == 1:
-            return next(iter(models.values()))
         else:
-            raise ConfigError(
-                "several chat models configured but no chat.default_model set; "
-                f"pass --model (available: {', '.join(sorted(models))})"
-            )
-    if model_id not in models:
-        available = ", ".join(sorted(models)) or "(none configured)"
-        raise ConfigError(f"unknown chat model {model_id!r}; available: {available}")
-    return models[model_id]
+            models = models_section(config_raw)
+            if len(models) == 1:
+                model_id = next(iter(models))
+            elif not models:
+                raise ConfigError("no models configured; add a 'models' section to config.yaml")
+            else:
+                raise ConfigError(
+                    "no chat.default_model set; pass --model "
+                    f"(available: {', '.join(sorted(models))})"
+                )
+    # Resolve the shared block (raises with the available ids if unknown), parse as chat.
+    return _parse_model(model_block(config_raw, model_id))
 
 
 def retrieval_top_k(config_raw: Mapping[str, Any]) -> int:

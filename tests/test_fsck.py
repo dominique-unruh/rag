@@ -15,18 +15,16 @@ from rag.maintenance import fsck
 from rag.translate.store import TranslationStore
 
 # A minimal embedding model so dangling-point checks have a collection to look at.
-_EMB_CFG = {
-    "models": [
-        {"id": "test", "type": "dense", "backend": "openai",
-         "api_base": "http://x", "model": "m", "dim": 4},
-    ],
+# Models live in the top-level `models:` section; `embedding.models` lists ids.
+_MODELS = {
+    "test": {"type": "dense", "backend": "openai", "api_base": "http://x", "model": "m", "dim": 4},
 }
 
 
 def _config(storage: Path) -> Config:
     """A Config rooted at ``storage`` with the test embedding model."""
     return Config(
-        {"storage": {"dir": str(storage)}, "embedding": _EMB_CFG},
+        {"storage": {"dir": str(storage)}, "models": _MODELS, "embedding": {"models": ["test"]}},
         storage / "config.yaml",
     )
 

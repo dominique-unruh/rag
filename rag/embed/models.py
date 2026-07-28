@@ -1,9 +1,10 @@
 """Embedding model registry (PLAN §6.1).
 
-Parses the enabled embedding models from the ``embedding.models`` config section
-into :class:`ModelSpec`s. Each model has a stable id (treated like a version),
-a type, a backend (``openai`` / ``ollama``), and the parameters that backend and
-its index need.
+Parses the enabled embedding models into :class:`ModelSpec`s. The models
+themselves are described once in the top-level ``models:`` section (see
+:mod:`rag.models`); ``embedding.models`` is just the list of ids to embed with.
+Each model has a stable id (treated like a version), a type, a backend (``openai``
+/ ``ollama``), and the parameters that backend and its index need.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..errors import ConfigError
+from ..models import model_block
 
 # Default chunking parameters if the config omits them.
 _DEFAULT_CHUNK_SIZE: int = 1024
@@ -151,20 +153,22 @@ def _parse_model(entry: Mapping[str, Any]) -> ModelSpec:
 
 
 def load_models(config_raw: Mapping[str, Any]) -> dict[str, ModelSpec]:
-    """Return all configured embedding models keyed by id.
+    """Return the enabled embedding models keyed by id.
 
-    Reads ``embedding.models`` (a list of mappings). Returns an empty dict if the
-    section is absent.
+    Reads ``embedding.models`` — a list of model ids — and resolves each against the
+    top-level ``models:`` section (:func:`rag.models.model_block`). Returns an empty
+    dict when ``embedding.models`` is absent.
     """
     section = _embedding_section(config_raw)
-    entries = section.get("models", [])
-    if not isinstance(entries, list):
-        raise ConfigError("embedding.models must be a list")
+    ids = section.get("models", [])
+    if not isinstance(ids, list):
+        raise ConfigError("embedding.models must be a list of model ids")
     models: dict[str, ModelSpec] = {}
-    for entry in entries:
-        if not isinstance(entry, Mapping):
-            raise ConfigError("each embedding model must be a mapping")
-        spec = _parse_model(entry)
+    for model_id in ids:
+        if not isinstance(model_id, str):
+            raise ConfigError(f"embedding.models entries must be model ids (strings), got {model_id!r}")
+        # Pull the shared block from the top-level registry, then parse as embedding.
+        spec = _parse_model(model_block(config_raw, model_id))
         models[spec.id] = spec
     return models
 
