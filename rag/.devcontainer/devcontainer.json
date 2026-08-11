@@ -1,0 +1,19 @@
+{
+  "image": "ubuntu:24.04",
+  "remoteUser": "dev",
+  "features": {
+    "./features/user": {
+      "username": "dev"
+    },
+    "ghcr.io/hwaien/devcontainer-features/match-host-time-zone": {},
+    "./features/apt": {
+      "packages": ""
+    },
+    "./features/claude": {
+      "dangerousPermissions": true
+    },
+    "./features/caveman": {
+      "mode": "ultra"
+    }
+  }
+}
