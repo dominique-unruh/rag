@@ -76,6 +76,29 @@ def _format_address(addr: Address) -> str:
     return f"{name} <{addr.addr_spec}>" if name else addr.addr_spec
 
 
+def _guess_last_name(sender: str) -> str:
+    """Best-effort guess at the sender's last name from a ``sender`` stable-metadata value.
+
+    ``sender`` is the comma-joined ``"NAME <EMAIL>"`` (or bare ``EMAIL``) form
+    produced by :func:`_format_address`; only the first address is used. When a
+    display name is present, its last whitespace-separated token is used (or the
+    part before a comma, for "Last, First" style names); otherwise the local part
+    of the email address (before ``@``) stands in for the last name.
+    """
+    # Split on the first '<' rather than ',' so a display name that itself
+    # contains a comma ("Doe, John") doesn't get cut in half.
+    head, sep, rest = sender.partition("<")
+    if sep:
+        display = head.strip().rstrip(",")
+        email = rest.split(">", 1)[0].strip()
+    else:
+        display = ""
+        email = sender.split(",", 1)[0].strip()
+    if display:
+        return display.split(",", 1)[0].strip() if "," in display else display.split()[-1]
+    return email.split("@", 1)[0] if email else "?"
+
+
 def _address_field(msg: EmailMessage, *fields: str) -> str:
     """Return a cleaned, comma-joined address list from the given header ``fields``.
 
@@ -259,6 +282,23 @@ class EmailExtractor(Extractor):
             if value:
                 parts.append(f"{field}={quote_plus(str(value))}")
         return _MAIL_LINK_BASE + "#" + "&".join(parts)
+
+    def shortname(self, store: Store, doc_id: str, max_length: int | None = None) -> str:
+        """Return ``"DATE PERSON SUBJECT"`` for the message, truncated to ``max_length``.
+
+        Looks up the message's own stable metadata via ``store``. ``DATE`` is the
+        ``date`` 8601 field's date part (``?`` if absent); ``PERSON`` is a
+        best-effort guess at the sender's last name (see :func:`_guess_last_name`),
+        from ``sender``; ``SUBJECT`` is ``title``.
+        """
+        stable = store.get_metadata(doc_id) or {}
+        date = str(stable.get("date", ""))[:10] or "?"
+        person = _guess_last_name(str(stable.get("sender", "")))
+        subject = str(stable.get("title", ""))
+        name = f"{date} {person} {subject}"
+        if max_length is not None and len(name) > max_length:
+            return name[:max_length] + "…"
+        return name
 
     def run(
         self,

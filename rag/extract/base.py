@@ -166,6 +166,21 @@ class Extractor(ABC):
         """
         return None
 
+    def shortname(self, store: Store, doc_id: str, max_length: int | None = None) -> str:
+        """Return a short, human-readable label for a document, truncated to ``max_length``.
+
+        ``store`` is the plugin's own scoped :class:`Store` handle — a plugin
+        looks up whatever fields it needs itself (e.g. via
+        :meth:`Store.get_metadata`) rather than being handed metadata. When
+        ``max_length`` is given and exceeded, the label is cut and suffixed with
+        ``"…"``. The default is ``doc_id`` itself (so truncated); plugins override
+        when a more descriptive label can be derived. Not abstract — a plugin may
+        legitimately have nothing better than the id.
+        """
+        if max_length is not None and len(doc_id) > max_length:
+            return doc_id[:max_length] + "…"
+        return doc_id
+
     def statistics(self, state_dir: Path, config: Mapping[str, Any]) -> dict[str, Any]:
         """Return cheap, plugin-specific statistics for the ``stats`` maintenance tool.
 

@@ -18,6 +18,8 @@ from qdrant_client import models
 from ..blobs import BlobStore
 from ..config import Config
 from ..db import Database
+from ..extract.discovery import load_plugin
+from ..extract.store import SqliteStore
 from ..interrupt import interrupt_requested
 from ..secrets import Secrets
 from .backends import embed_texts
@@ -213,8 +215,9 @@ def run_embed(
                 # processed is the count already done; this doc is the next one.
                 print(
                     f"[{processed + 1}/{total}] "
-                    f"embedding {doc.source_type}:{doc.doc_id} (set {doc.set_id}) "
-                    f"-> {n_chunks} chunk(s) [{sub}] into {spec.id}...",
+                    f"embedding {doc.source_type}:"
+                    f"{load_plugin(doc.source_type)().shortname(SqliteStore(database.conn, blobs, doc.source_type), doc.doc_id, 80)} "
+                    f"(set {doc.set_id}) -> {n_chunks} chunk(s) [{sub}] into {spec.id}...",
                     end="",
                     flush=True,
                     file=sys.stderr,

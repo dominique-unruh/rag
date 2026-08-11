@@ -15,7 +15,15 @@ CONFIG     ?= config.yaml
 QDRANT_IMAGE ?= qdrant/qdrant
 QDRANT_NAME  ?= rag-qdrant
 
-.PHONY: extract extract_full delete translate embed browse chat pipeline ollama qdrant-server qdrant-server-stop
+.PHONY: venv extract extract_full delete translate embed browse chat pipeline ollama qdrant-server qdrant-server-stop
+
+## Create the local dev venv (.venv) if missing, then install/sync the project +
+## test dependencies into it via uv (https://astral.sh/uv). Safe to re-run after
+## pyproject.toml changes.
+venv:
+	@command -v uv >/dev/null 2>&1 || { echo "error: uv not installed (https://astral.sh/uv.sh)"; exit 1; }
+	@.venv/bin/python --version >/dev/null 2>&1 || uv venv .venv --python python3 --clear
+	uv pip install -e '.[test]' --python .venv/bin/python
 
 ## Extract up to LIMIT emails: all of the 'private' account, plus the INBOX of
 ## 'rwth', 'ut' and 'qis-office'. Additive only — no deletions here (a message
