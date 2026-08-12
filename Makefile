@@ -25,15 +25,17 @@ venv:
 	@.venv/bin/python --version >/dev/null 2>&1 || uv venv .venv --python python3 --clear
 	uv pip install -e '.[test]' --python .venv/bin/python
 
-## Extract up to LIMIT emails: all of the 'private' account, plus the INBOX of
-## 'rwth', 'ut' and 'qis-office'. Additive only — no deletions here (a message
-## moved out of a synced folder is never mistaken for a deletion). Run `make
-## delete` to reconcile removals.
 extract:
 	$(RAG) --verbose extract email account=private "since=$(SINCE)"
 	$(RAG) --verbose extract email account=rwth "since=$(SINCE)"
 	$(RAG) --verbose extract email account=ut "since=$(SINCE)"
 	$(RAG) --verbose extract email account=qis-office "since=$(SINCE)"
+
+extract-quick:
+	$(RAG) --verbose extract email account=private folder=INBOX count=$(LIMIT)
+	$(RAG) --verbose extract email account=rwth folder=INBOX count=$(LIMIT)
+	$(RAG) --verbose extract email account=ut folder=INBOX count=$(LIMIT)
+	$(RAG) --verbose extract email account=qis-office folder=INBOX count=$(LIMIT)
 
 ## Like `extract`, but a full resync (full=true): re-fetch every message,
 ## ignoring the stored per-folder UID memory.
@@ -71,7 +73,7 @@ chat: ollama qdrant-server
 ## the target exits non-zero if any stage failed.
 pipeline:
 	@rc=0; \
-	$(MAKE) extract   || rc=1; \
+	$(MAKE) extract-quick   || rc=1; \
 	$(MAKE) translate || rc=1; \
 	$(MAKE) embed     || rc=1; \
 	exit $$rc
