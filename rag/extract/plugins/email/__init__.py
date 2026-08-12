@@ -34,6 +34,7 @@ from ...base import Extractor, Store
 from .imap import (
     _SECRETS_SUBDIR,
     _UIDMAP_FILENAME,
+    _clean_header_str,
     _entry_message_id,
     _load_uidmap,
     _save_uidmap,
@@ -72,8 +73,9 @@ _MAIL_LINK_FIELDS: tuple[tuple[str, str], ...] = (
 def _format_address(addr: Address) -> str:
     """Render one parsed :class:`Address` as ``NAME <EMAIL>`` (or just ``EMAIL``)."""
     # headerregistry already RFC 2047-decodes the display name for us.
-    name = addr.display_name
-    return f"{name} <{addr.addr_spec}>" if name else addr.addr_spec
+    name = _clean_header_str(addr.display_name) if addr.display_name else addr.display_name
+    addr_spec = _clean_header_str(addr.addr_spec)
+    return f"{name} <{addr_spec}>" if name else addr_spec
 
 
 def _guess_last_name(sender: str) -> str:
@@ -148,7 +150,7 @@ def _message_ids(header: object) -> list[str]:
     """
     if header is None:
         return []
-    text = str(header)
+    text = _clean_header_str(str(header))
     # Message-ids are normally wrapped in angle brackets; grab those first.
     ids = re.findall(r"<([^>]+)>", text)
     if not ids:
@@ -189,7 +191,7 @@ def build_stable_metadata(msg: EmailMessage) -> dict[str, Any]:
         "recipients": _address_field(msg, "To", "Cc"),
         # The email's title is its Subject (global `title` key). str() of a decoded
         # header yields the Unicode subject ("" when absent).
-        "title": str(subject) if subject is not None else "",
+        "title": _clean_header_str(str(subject)) if subject is not None else "",
         "mime-type": _EMAIL_MIME,
     }
     # The message's own id (bare, no angle brackets — same form as the doc_id and

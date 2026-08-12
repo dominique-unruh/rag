@@ -448,6 +448,18 @@ def _fetch_message(client: imaplib.IMAP4, uid: int) -> tuple[bytes, bool] | None
     return bytes(raw), is_read
 
 
+def _clean_header_str(value: str) -> str:
+    """Strip lone surrogate code points from a decoded header value.
+
+    ``policy.default`` decodes malformed 8-bit header bytes (no valid RFC 2047
+    encoded-word) via an ``unknown-8bit``/``surrogateescape`` fallback, which can
+    leave lone surrogates in the resulting ``str``. Those aren't valid UTF-8, so
+    they crash the SQLite insert later; replace them with ``?`` here, at the
+    point where header text enters our data model.
+    """
+    return value.encode("utf-8", "replace").decode("utf-8")
+
+
 def _looks_like_email(msg: Any) -> bool:
     """Return whether ``msg`` looks like a real RFC822 email.
 
@@ -471,7 +483,7 @@ def _message_id(raw: bytes, uidvalidity: int, uid: int) -> tuple[str, Any]:
     header = parsed["Message-ID"]
     if header is not None:
         # str() renders the (decoded) header; strip brackets/whitespace.
-        msgid = str(header).strip().strip("<>").strip()
+        msgid = _clean_header_str(str(header)).strip().strip("<>").strip()
     else:
         # No Message-ID: fall back to a UID-based identifier (stable per epoch).
         msgid = f"uidvalidity{uidvalidity}-uid{uid}"
@@ -521,7 +533,7 @@ def _fetch_msgid(client: imaplib.IMAP4, uid: int, validity: int) -> str | None:
     parsed = email.message_from_bytes(bytes(raw), policy=email.policy.default)
     header = parsed["Message-ID"]
     if header is not None:
-        return str(header).strip().strip("<>").strip()
+        return _clean_header_str(str(header)).strip().strip("<>").strip()
     # No Message-ID: same UID-based fallback as _message_id (stable per epoch).
     return f"uidvalidity{validity}-uid{uid}"
 
