@@ -19,6 +19,7 @@ using an ``https://`` URL.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -46,6 +47,10 @@ _LOCAL_SUBDIR: str = "qdrant"
 
 # Default per-request timeout (seconds) for a server client if config omits it.
 _DEFAULT_TIMEOUT: int = 60
+
+# Hostnames that never leave the local machine — an API key sent to one of these
+# over plain http is not actually exposed on the wire to anyone else.
+_LOOPBACK_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1"})
 
 # Prefix for the keyring secret holding the Qdrant server API key / JWT, in the
 # shared "rag" keyring service (alongside the email plugin's secrets). The full
@@ -160,12 +165,21 @@ def open_qdrant_client(config: Config, *, secrets: Secrets | None = None) -> Qdr
         secret_name = _api_key_secret(str(url))
         api_key = _resolve_api_key(secret_name, secrets)
         try:
-            client = QdrantClient(
-                url=str(url),
-                api_key=api_key,
-                prefer_grpc=bool(settings.get("prefer_grpc", False)),
-                timeout=int(settings.get("timeout", _DEFAULT_TIMEOUT)),
-            )
+            with warnings.catch_warnings():
+                if urlsplit(str(url)).hostname in _LOOPBACK_HOSTS:
+                    # The key never leaves the machine on loopback, so qdrant-client's
+                    # blanket "api key over http" warning has nothing to tell us here.
+                    warnings.filterwarnings(
+                        "ignore",
+                        message="Api key is used with an insecure connection.",
+                        category=UserWarning,
+                    )
+                client = QdrantClient(
+                    url=str(url),
+                    api_key=api_key,
+                    prefer_grpc=bool(settings.get("prefer_grpc", False)),
+                    timeout=int(settings.get("timeout", _DEFAULT_TIMEOUT)),
+                )
             # Cheap round-trip so a bad URL / wrong key / down server is reported
             # here with actionable text instead of deep in an upsert call.
             client.get_collections()
