@@ -1,0 +1,14 @@
+{
+  "deps": [],
+  "tests": [],
+  "external": {
+    "ref": "ghcr.io/hwaien/devcontainer-features/match-host-time-zone",
+    "description": "Bind-mounts the host's /etc/localtime into the container so its clock/timezone matches the host. Linux hosts only (Docker Desktop's VM has its own /etc/localtime, not the Mac/Windows host's).",
+    "options": {}
+  },
+  "provenance": {
+    "remote": "https://github.com/dominique-unruh/devcontainer-config.git",
+    "pathInRepo": "features/timezone/meta.json",
+    "contentHash": "d951e5779195f5c0fc2e275030c29bfa89b8a2cb14199a13e3a8b7fbf2864df0"
+  }
+}
