@@ -59,6 +59,11 @@ _API_KEY_SECRET_PREFIX: str = "vector_store_api_key"
 # stable and identical to the Makefile's derivation).
 _DEFAULT_PORT: int = 6333
 
+# Max points per upsert request. Qdrant's server REST API caps request bodies at
+# 32MiB; one document (e.g. a large attachment) can produce enough chunks to blow
+# past that in a single upsert, so large point lists are split into batches.
+_UPSERT_BATCH_SIZE: int = 128
+
 
 @dataclass(frozen=True)
 class SearchHit:
@@ -293,8 +298,11 @@ class VectorStore:
         leaves stale points from the old set behind.
         """
         self._delete_document(collection, source_type, doc_id)
-        if points:
-            self._client.upsert(collection, points=points)
+        # Batch the upsert: a single document's chunks can exceed the server's
+        # per-request body size limit (e.g. large attachments -> hundreds of
+        # chunks), so send points in bounded-size groups instead of one request.
+        for start in range(0, len(points), _UPSERT_BATCH_SIZE):
+            self._client.upsert(collection, points=points[start : start + _UPSERT_BATCH_SIZE])
 
     def _delete_document(self, collection: str, source_type: str, doc_id: str) -> None:
         """Delete all points of one document from ``collection`` (by payload filter)."""
