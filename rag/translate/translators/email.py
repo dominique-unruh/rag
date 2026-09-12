@@ -9,6 +9,7 @@ emails and PDFs — are handled uniformly).
 
 from __future__ import annotations
 
+import codecs
 import email
 import email.policy
 from email.message import EmailMessage
@@ -31,13 +32,41 @@ def _header_block(msg: EmailMessage) -> str:
     return "\n".join(lines)
 
 
+def _is_known_charset(name: str) -> bool:
+    """Return whether ``name`` is a charset Python can actually decode with."""
+    try:
+        codecs.lookup(name)
+        return True
+    except LookupError:
+        return False
+
+
+def _decode_text_part(part: EmailMessage) -> str:
+    """Decode a text/* part to ``str``, tolerating an unusable declared charset.
+
+    ``get_content`` reads the charset from the part's Content-Type header and
+    raises ``LookupError`` when that charset is not a registered Python codec
+    (real senders emit junk like ``charset="unicode"``), which would otherwise
+    abort the whole run. ``get_content`` takes no charset override, so in that
+    one case we rewrite the header's charset to UTF-8 and let ``get_content`` do
+    everything else — it already undoes the transfer-encoding and replaces
+    undecodable bytes by default. Any *other* failure still surfaces.
+    """
+    charset = part.get_content_charset()  # declared charset, or None if absent
+    if charset is not None and not _is_known_charset(charset):
+        # Overwrite the unusable charset in place; the message is parsed fresh
+        # per document and then discarded, so mutating it here is safe.
+        part.set_param("charset", "utf-8", header="Content-Type")
+    return part.get_content()  # transfer-decode + charset-decode (errors=replace)
+
+
 def _body_markdown(msg: EmailMessage) -> str:
     """Return the message body as Markdown (HTML converted, plain text kept)."""
     # Prefer a plain-text body, falling back to HTML.
     body = msg.get_body(preferencelist=("plain", "html"))
     if body is None:
         return ""
-    content = body.get_content()  # decoded str for text/* parts
+    content = _decode_text_part(body)
     if body.get_content_type() == "text/html":
         return html_to_markdown(content)
     return content.strip()
