@@ -15,6 +15,7 @@ dependencies = [
     "pypdf",
     "qdrant-client",
     "zstandard",
+    "python-magic",
 ]
 
 [project.optional-dependencies]

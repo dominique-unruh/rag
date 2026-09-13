@@ -76,6 +76,37 @@ metadata **without** bumping the version.
 
 ---
 
+## Documents (`source_type = documents`)
+
+The filesystem plugin. `doc_id = "<folder-id>:<relative-path>"`; the blob is the
+file's raw bytes.
+
+### `stable_metadata`
+
+| Key         | Global? | Format                | Meaning |
+|-------------|---------|-----------------------|---------|
+| `path`      | docs    | POSIX relative path   | The file's path relative to its folder root. |
+| `size`      | docs    | integer (bytes)       | The file's size. |
+| `mime-type` | global  | IANA media type       | Sidecar `content_type` if present, else libmagic content sniff (with the extension winning over a generic `text/plain`, so `.md` → `text/markdown`). |
+
+If a `<file>.metadata.json` **sidecar** is present, all of its keys are merged in
+too (e.g. `title`, `url`, `doc_type`, `facet-*`, `content_hash`, `content_length`,
+`server_filename`) — the `path`/`size`/`mime-type` above take precedence over any
+like-named sidecar key. `title` (from a sidecar) drives the document shortname and
+`url` its source link.
+
+### `transient_metadata`
+
+| Key      | Format            | Meaning |
+|----------|-------------------|---------|
+| `folder` | string            | The configured `folder-id` the file lives under. |
+| `mtime`  | ISO-8601 UTC `…Z` | The file's (and sidecar's, whichever is newer) modification time; the change-detection cursor. |
+
+Re-touching a file (new mtime, identical bytes) refreshes `mtime` **without**
+bumping the version.
+
+---
+
 ## Synthetic sub-documents (email attachments)
 
 When the email translator descends into attachments it builds *synthetic*

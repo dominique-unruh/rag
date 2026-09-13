@@ -8,6 +8,23 @@
   top-level `extractors:` map); the framework hands a plugin just that subtree, so
   plugins never parse the global file or see unrelated keys.
 
+### `extractors.documents` (filesystem)
+
+A `folders` list plus two optional plugin-wide keys (see
+[extraction.md](extraction.md) for behaviour):
+
+- `folders` — one entry per on-disk folder, each `{folder-id, path, description}`.
+  `folder-id` is short, stable and unique (it prefixes doc-ids); `path` is the
+  directory to walk (`~` expanded).
+- `max_file_size` — optional per-file byte cap; files above it are skipped with an
+  error. Default 100 MiB.
+- `exclude` — optional list of extra basename globs, **added to** the built-in
+  defaults (`.*`, `*~`, `*.swp`, `*.tmp`, `*.part`, `#*#`).
+
+Mime detection needs **libmagic** at runtime (the `python-magic` binding is a
+declared dependency; also install the system library, e.g. `apt install
+libmagic1`). This plugin uses no secrets.
+
 ## Secrets
 
 - Resolved, in order, from the desktop **keyring**, then an optional **file**, then

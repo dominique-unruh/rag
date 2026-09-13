@@ -26,8 +26,10 @@ build on it — this is a from-scratch rewrite.
   - `store.py` — `SqliteStore`: version handling + change detection.
   - `discovery.py` — finds plugins; **`source_type` == plugin subdirectory name** (enforced).
   - `runner.py` — wires config/secrets/db/blobs/state-dir and invokes a plugin.
-  - `plugins/email/` — the only source plugin for now (IMAP). Working email-only
-    until the system is proven; other sources come later.
+  - `plugins/email/` — IMAP source plugin (the first, most-exercised one).
+  - `plugins/documents/` — filesystem source plugin: ingests files from configured
+    on-disk folders (Obsidian vaults, scraper mirrors with `.metadata.json`
+    sidecars). Mime detection via libmagic (`python-magic`).
 - `rag/gitinfo.py` — git revision + clean-tree check (translation git gating).
 - `rag/translate/` — module 2:
   - `base.py` — `Document`, `Translation`, the stateless `Translator` ABC, `make_translation`.

@@ -29,6 +29,30 @@ extractors:
         #   1. desktop keyring (service "rag", key = "imap:<host>:<username>")
         #   2. interactive prompt (cached to the keyring for next time)
 
+  documents:
+    # A list of on-disk folders. Every regular file under a folder becomes a
+    # document with doc_id = "<folder-id>:<relative-path>". Recurses into
+    # subdirectories; symlinks and hidden files/dirs are skipped.
+    #
+    # A file may carry a "<file>.metadata.json" sidecar (as produced by the RWTH
+    # intranet scraper); its JSON is folded into the document's metadata and its
+    # "content_type" fixes the mime-type.
+    #
+    # Mime detection uses libmagic (content sniffing) — install the system
+    # library (e.g. `apt install libmagic1`); the Python binding python-magic is
+    # a declared dependency.
+    folders:
+      - folder-id: notes            # short, stable; used in doc-ids
+        description: Obsidian vault  # human-readable only
+        path: ~/notes               # ~ is expanded
+      - folder-id: rwth-docs
+        description: RWTH intranet document mirror (with sidecars)
+        path: ~/r/ai-automation/rwth-intranet-scrape/files
+    # max_file_size: 104857600      # optional; per-file byte cap (default 100 MiB).
+    #                               # Files above it are skipped with an error.
+    # exclude:                      # optional; extra basename globs, added to the
+    #   - "*.bak"                   # built-in defaults (.*, *~, *.swp, *.tmp, ...)
+
 # Embedding (module 3). Each model has its own vector index; run one pass per
 # model: `rag embed --model <id>`.
 embedding:

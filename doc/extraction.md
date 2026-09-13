@@ -266,3 +266,70 @@ global mode and rejects the additive options below.
 
 Timestamps are parsed by the shared timestamp utility (see
 [configuration.md](configuration.md)).
+
+## Example plugin: documents (filesystem)
+
+Ingests files from one or more configured on-disk folders. One plugin serves
+several folder kinds with no per-kind code: an **Obsidian vault** (a tree of
+`.md` files, no sidecars) and a **scraper mirror** (files each accompanied by a
+`<file>.metadata.json` sidecar) are both just `folders:` entries.
+
+**Configuration** (its YAML subtree): a list of **folders**, plus two optional
+plugin-wide settings. Each folder:
+- `folder-id` — short, stable string; used in doc-ids. Must be unique.
+- `description` — human-readable, for human consumption only.
+- `path` — the directory to walk (recursively). `~` is expanded.
+
+Plugin-wide: `max_file_size` (per-file byte cap, default 100 MiB) and `exclude`
+(extra basename globs, **added to** the built-in defaults). See
+[configuration.md](configuration.md).
+
+**Documents**:
+- `doc_id = "<folder-id>:<relative-path>"` — the folder-id then the file's path
+  relative to that folder root, POSIX-separated.
+- **Blob** = the file's raw bytes.
+- **Stable / transient metadata**: see [metadata.md](metadata.md).
+
+**What is walked.** The tree is walked recursively in a deterministic order.
+**Symlinks (files and directories) are skipped.** Excluded directories are pruned
+(their subtrees are never descended). The default excludes are the basename globs
+`.*`, `*~`, `*.swp`, `*.tmp`, `*.part`, `#*#` — so hidden files/dirs (including a
+vault's `.obsidian/`) and editor backups are ignored; the config `exclude` list
+adds to these. A file larger than `max_file_size` is skipped with an **error**
+printed to stderr (never silently, never truncated) and the run continues.
+
+**Sidecars.** A file named `<file>.metadata.json` next to `<file>` is that file's
+metadata sidecar (the format the RWTH intranet scraper emits): a JSON object of
+fields like `title`, `url`, `doc_type`, `facet-*`, `content_hash`, `content_type`.
+Its contents are folded into the document's stable metadata (providing
+provenance), and its `content_type` fixes the mime-type. A sidecar is **never a
+document on its own** — it is consumed with its partner file, and an orphan
+sidecar (no partner) is ignored.
+
+**Mime detection.** libmagic (via `python-magic`) is a **hard dependency** — if
+it or the system library is missing, `rag extract documents` fails at start with
+an install hint rather than silently degrading. A sidecar `content_type` wins;
+otherwise the type is content-sniffed by magic, except that when magic can only
+say `text/plain`/`application/octet-stream` and the file extension names
+something more specific, the extension wins (so e.g. `.md` → `text/markdown`,
+which magic alone reports as `text/plain`).
+
+**Change detection (no state dir).** All state lives in the DB: the transient
+`mtime` doubles as the sync cursor. On each run a file is re-read only when its
+**effective mtime** (the newer of the file and its sidecar) differs from the one
+recorded last time; otherwise it is skipped without reading. Because the mtime is
+transient, a pure touch (identical bytes) refreshes it without bumping the
+version. `full=1` ignores mtimes and re-reads every file (bounded by `count`);
+the framework's `upsert` still decides whether anything actually changed.
+
+**Deletion.** After a folder is walked **completely**, documents for that folder
+(matched via the transient `folder` filter) whose files were not seen are deleted
+(cascading as above). A pass cut short by `count` or a graceful interrupt has an
+incomplete view, so deletion detection is skipped for that folder — a partial run
+never removes documents.
+
+**`run` options**:
+- `folder=<folder-id>` — restrict to one configured folder (default: all).
+- `count=<N>` — max number of files to (re-)read this run, shared across folders.
+  A count-limited run skips deletion detection.
+- `full=1` — ignore stored mtimes and re-read every in-scope file.
