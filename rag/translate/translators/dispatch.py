@@ -12,6 +12,39 @@ from dataclasses import replace
 
 from ..base import Document, Translation, Translator
 
+# How many leading bytes to inspect when guessing whether unknown content is text.
+_TEXT_SNIFF_BYTES: int = 8192
+# Minimum fraction of decoded characters that must be printable/whitespace for a
+# content sniff to count the document as human-readable text.
+_TEXT_PRINTABLE_RATIO: float = 0.9
+
+
+def _looks_like_text(mime: str, content: bytes) -> bool:
+    """Return whether a document should get an identity (text) translation.
+
+    True when the mime type is any ``text/*`` (e.g. ``text/x-tex``, ``text/csv``
+    — declared human-readable), or when the type is unrecognised but the bytes
+    themselves look like text: UTF-8 decodable, no NUL bytes, and overwhelmingly
+    printable/whitespace characters. Binary blobs (images, archives, …) return
+    False so they are skipped rather than dumped as mojibake.
+    """
+    if mime.startswith("text/"):
+        return True
+    if not content:
+        # Nothing to index and no signal that it is text — leave it to the caller.
+        return False
+    sample = content[:_TEXT_SNIFF_BYTES]
+    # A NUL byte is a reliable binary marker.
+    if b"\x00" in sample:
+        return False
+    try:
+        decoded = sample.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    # Count anything that is ordinary text: common whitespace or >= space.
+    printable = sum(1 for ch in decoded if ch in "\t\n\r\f\v" or ch >= " ")
+    return bool(decoded) and printable / len(decoded) >= _TEXT_PRINTABLE_RATIO
+
 # Mime types (without parameters) handled by the `text` translator.
 _TEXT_TYPES: frozenset[str] = frozenset(
     {"text/plain", "text/markdown", "text/html", "application/xhtml+xml"}
@@ -65,8 +98,13 @@ class Dispatch(Translator):
             from .xlsx import translator as target
         elif mime in _IGNORE_TYPES:
             from .ignore import translator as target
+        elif _looks_like_text(mime, document.content):
+            # No dedicated translator, but the document is human-readable text
+            # (declared text/*, e.g. .tex/.csv, or unrecognised-but-looks-like
+            # text): translate it as-is via the identity `text` translator.
+            from .text import translator as target
         else:
-            # Unknown type: nothing to translate (TBD as types are added).
+            # Unknown, non-text type: nothing indexable to translate.
             print(
                 f"warning: no translator for mime {mime!r} "
                 f"({document.doc_id}:{'/'.join(document.sub_doc_id) or 'root'})",

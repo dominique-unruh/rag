@@ -191,8 +191,28 @@ def test_dispatch_routes_xlsx() -> None:
     assert parts[0].text.startswith("## Sales")
 
 
+def test_dispatch_text_subtype_identity() -> None:
+    """An unsupported text/* type (e.g. .tex) is translated as-is via Text."""
+    tex = "\\section{Hi}\nbody\n"
+    doc = Document("t", [], tex.encode(), {"mime-type": "text/x-tex"}, {})
+    parts = dispatch.translate(doc)
+    assert len(parts) == 1
+    assert parts[0].text == tex  # identity passthrough, no conversion
+    assert parts[0].debug_info == "Dispatched to Text"
+
+
+def test_dispatch_unknown_but_texty_identity() -> None:
+    """An unrecognised mime whose bytes look like text gets an identity translation."""
+    doc = Document("u", [], b"just some plain words\nline two\n",
+                   {"mime-type": "application/x-unknown"}, {})
+    parts = dispatch.translate(doc)
+    assert len(parts) == 1
+    assert "plain words" in parts[0].text
+    assert parts[0].debug_info == "Dispatched to Text"
+
+
 def test_dispatch_unknown_mime_yields_nothing() -> None:
-    """An unhandled mime type produces no translation."""
+    """An unhandled, binary (NUL-containing) mime type produces no translation."""
     doc = Document("d", [], b"\x00\x01", {"mime-type": "application/octet-stream"}, {})
     assert dispatch.translate(doc) == []
 

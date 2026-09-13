@@ -148,8 +148,11 @@ Dispatch()`), which is what the pipeline loads and calls. Default: **`dispatch`*
   - Excel OOXML (`…spreadsheetml.sheet`, `…spreadsheetml.template`) → `Xlsx`;
   - cryptographic signature parts (`application/x-pkcs7-signature`,
     `application/pkcs7-signature`, `application/pgp-signature`) → `Ignore`.
-  (Unknown types produce no translation, with a warning — TBD as more types are
-  added.)
+  - **fallback for anything else that is text** → `Text` (identity): any other
+    `text/*` type (e.g. `text/x-tex`, `text/csv`), or an unrecognised mime whose
+    bytes *look like* text (UTF-8 decodable, no NUL bytes, ≥90% printable). This
+    keeps human-readable formats indexable as-is without a dedicated translator.
+  (Only genuinely binary/unknown types produce no translation, with a warning.)
 - **`email`** (`Email`):
   - Splits the message into the **body** (main text, no attachments) and the
     **attachments**.
