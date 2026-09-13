@@ -50,10 +50,10 @@ class TranslateOptions:
     """Retranslate even documents whose active translation is up to date."""
 
     dry_run: bool = False
-    """Translate but do not write to the DB (allowed on a dirty repo)."""
+    """Translate but do not write to the DB."""
 
     inspect: bool = False
-    """Print translations for review instead of storing them (dirty repo OK)."""
+    """Print translations for review instead of storing them."""
 
     verbose: bool = False
     """Print one progress line per translated document."""
@@ -103,9 +103,9 @@ def run_translation(
 
     Loads the selected translator, iterates the documents needing translation
     (per ``options``), enforces invariants, and writes each result as a
-    translation set — unless ``inspect``/``dry_run`` is set. Storing requires a
-    clean git tree (so the recorded ``git_rev`` is meaningful); inspection and
-    dry-run do not.
+    translation set — unless ``inspect``/``dry_run`` is set. A real DB write
+    records the current ``git_rev`` for provenance, but no longer requires a
+    clean working tree.
     """
     storage = config.storage_dir
     translator = load_translator(options.translator)
@@ -114,16 +114,15 @@ def run_translation(
     # done). Cheap after the first run; harmless in inspect/dry-run.
     blobs.migrate()
 
-    # Git gating: only a real DB write needs a clean tree + a meaningful revision.
+    # Record the current git revision for provenance on a real DB write. The
+    # working tree is no longer required to be clean; a dirty tree just gets a
+    # ``-dirty`` suffix so the recorded ``git_rev`` still flags it.
     store_to_db = not (options.dry_run or options.inspect)
     git_rev = ""
     if store_to_db:
-        if not is_clean():
-            raise TranslationError(
-                "refusing to store translations: the working tree is dirty. "
-                "Commit your changes, or use --dry-run / --inspect."
-            )
         git_rev = git_revision()
+        if not is_clean():
+            git_rev += "-dirty"
 
     owns_db = db is None
     database = db if db is not None else Database.open(storage / _DB_FILENAME)

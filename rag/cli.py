@@ -107,11 +107,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     translate.add_argument(
         "--dry-run", action="store_true",
-        help="translate but do not write to the DB (dirty repo allowed)",
+        help="translate but do not write to the DB",
     )
     translate.add_argument(
         "--inspect", action="store_true",
-        help="print translations for review instead of storing them (dirty repo allowed)",
+        help="print translations for review instead of storing them",
     )
 
     # --- embed subcommand ------------------------------------------------
