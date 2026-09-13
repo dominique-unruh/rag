@@ -116,7 +116,6 @@ def _minimal_docx(body_xml: str) -> bytes:
 
 def test_docx_translator_converts_to_markdown() -> None:
     """The docx translator maps Word styles to Markdown (headings, bold)."""
-    pytest.importorskip("mammoth")
     from rag.translate.translators.docx import translator as docx_translator
 
     body = (
@@ -134,7 +133,6 @@ def test_docx_translator_converts_to_markdown() -> None:
 
 def test_dispatch_routes_docx_and_dotx() -> None:
     """Dispatch routes both the docx and dotx (template) mime types to Docx."""
-    pytest.importorskip("mammoth")
     body = "<w:p><w:r><w:t>plain para</w:t></w:r></w:p>"
     for mime in (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",

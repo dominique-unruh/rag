@@ -14,8 +14,9 @@ from pathlib import Path
 
 import pytest
 
-# libmagic is a hard dependency of the plugin; skip cleanly where it is absent.
-pytest.importorskip("magic")
+# libmagic is a hard dependency of the plugin: import it here so a missing
+# python-magic / libmagic makes these tests FAIL (not silently skip).
+import magic  # noqa: F401
 
 from rag.blobs import BlobStore
 from rag.db import Database
