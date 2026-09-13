@@ -25,6 +25,14 @@ _DOCX_TYPES: frozenset[str] = frozenset(
     }
 )
 
+# Excel OOXML mime types handled by the `xlsx` translator (workbook + template).
+_XLSX_TYPES: frozenset[str] = frozenset(
+    {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.template",
+    }
+)
+
 # Mime types deliberately dropped (no indexable content) — routed to `ignore`,
 # so they are silently skipped rather than warned about. Cryptographic signature
 # parts: S/MIME (both the `x-` and IANA-registered spellings) and PGP.
@@ -53,6 +61,8 @@ class Dispatch(Translator):
             from .pdf import translator as target
         elif mime in _DOCX_TYPES:
             from .docx import translator as target
+        elif mime in _XLSX_TYPES:
+            from .xlsx import translator as target
         elif mime in _IGNORE_TYPES:
             from .ignore import translator as target
         else:

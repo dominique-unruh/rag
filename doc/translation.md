@@ -145,6 +145,7 @@ Dispatch()`), which is what the pipeline loads and calls. Default: **`dispatch`*
     `application/xhtml+xml`) → `Text`;
   - PDF (`application/pdf`) → `PDF`;
   - Word OOXML (`…wordprocessingml.document`, `…wordprocessingml.template`) → `Docx`;
+  - Excel OOXML (`…spreadsheetml.sheet`, `…spreadsheetml.template`) → `Xlsx`;
   - cryptographic signature parts (`application/x-pkcs7-signature`,
     `application/pkcs7-signature`, `application/pgp-signature`) → `Ignore`.
   (Unknown types produce no translation, with a warning — TBD as more types are
@@ -169,6 +170,9 @@ Dispatch()`), which is what the pipeline loads and calls. Default: **`dispatch`*
 - **`docx`** (`Docx`): convert a Word OOXML document (`.docx`/`.dotx`) to Markdown
   via `mammoth` (docx→semantic HTML, mapping headings/lists/tables/bold) plus the
   shared HTML→Markdown helper. One `Translation`.
+- **`xlsx`** (`Xlsx`): convert an Excel OOXML workbook (`.xlsx`/`.xltx`) to
+  Markdown via `openpyxl` — one `## <sheet>` section per worksheet, each a Markdown
+  table of its cached cell values (formulas are not evaluated). One `Translation`.
 - **`ignore`** (`Ignore`): always returns no translations. Used by `dispatch` for
   mime types that carry no indexable content (e.g. S/MIME signature parts) so they
   are dropped silently rather than warned about.

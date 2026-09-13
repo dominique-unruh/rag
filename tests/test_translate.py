@@ -145,6 +145,52 @@ def test_dispatch_routes_docx_and_dotx() -> None:
         assert parts[0].debug_info == "Dispatched to Docx"
 
 
+def _make_xlsx() -> bytes:
+    """Build an in-memory .xlsx: a data sheet, an empty sheet, and a sparse one."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sales"
+    ws.append(["Item", "Qty"])
+    ws.append(["Widget | A", 3])  # pipe must be escaped
+    ws.append(["Gadget", None])   # empty cell
+    wb.create_sheet("Empty")      # no cells -> skipped
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_xlsx_translator_renders_markdown_tables() -> None:
+    """The xlsx translator emits one Markdown table per non-empty sheet."""
+    from rag.translate.translators.xlsx import translator as xlsx_translator
+
+    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    doc = Document("xl", [], _make_xlsx(), {"mime-type": mime}, {})
+    result = xlsx_translator.translate(doc)
+    assert len(result) == 1 and result[0].doc_id == "xl"
+    text = result[0].text
+    assert text == (
+        "## Sales\n"
+        "| Item | Qty |\n"
+        "| --- | --- |\n"
+        "| Widget \\| A | 3 |\n"
+        "| Gadget |  |"
+    )
+    # The empty sheet contributes nothing.
+    assert "Empty" not in text
+
+
+def test_dispatch_routes_xlsx() -> None:
+    """Dispatch routes the xlsx mime type to Xlsx."""
+    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    doc = Document("xl", [], _make_xlsx(), {"mime-type": mime}, {})
+    parts = dispatch.translate(doc)
+    assert len(parts) == 1
+    assert parts[0].debug_info == "Dispatched to Xlsx"
+    assert parts[0].text.startswith("## Sales")
+
+
 def test_dispatch_unknown_mime_yields_nothing() -> None:
     """An unhandled mime type produces no translation."""
     doc = Document("d", [], b"\x00\x01", {"mime-type": "application/octet-stream"}, {})
