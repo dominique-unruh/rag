@@ -144,6 +144,7 @@ Dispatch()`), which is what the pipeline loads and calls. Default: **`dispatch`*
   - text / HTML / Markdown (`text/plain`, `text/html`, `text/markdown`,
     `application/xhtml+xml`) → `Text`;
   - PDF (`application/pdf`) → `PDF`;
+  - Word OOXML (`…wordprocessingml.document`, `…wordprocessingml.template`) → `Docx`;
   - cryptographic signature parts (`application/x-pkcs7-signature`,
     `application/pkcs7-signature`, `application/pgp-signature`) → `Ignore`.
   (Unknown types produce no translation, with a warning — TBD as more types are
@@ -165,6 +166,9 @@ Dispatch()`), which is what the pipeline loads and calls. Default: **`dispatch`*
   `sub_doc_id`.
 - **`pdf`** (`PDF`): extract the text from the PDF and return it as one
   `Translation`.
+- **`docx`** (`Docx`): convert a Word OOXML document (`.docx`/`.dotx`) to Markdown
+  via `mammoth` (docx→semantic HTML, mapping headings/lists/tables/bold) plus the
+  shared HTML→Markdown helper. One `Translation`.
 - **`ignore`** (`Ignore`): always returns no translations. Used by `dispatch` for
   mime types that carry no indexable content (e.g. S/MIME signature parts) so they
   are dropped silently rather than warned about.

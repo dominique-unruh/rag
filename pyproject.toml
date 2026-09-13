@@ -12,6 +12,7 @@ dependencies = [
     "flask",
     "argcomplete",
     "markdownify",
+    "mammoth",
     "pypdf",
     "qdrant-client",
     "zstandard",

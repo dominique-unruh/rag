@@ -37,7 +37,7 @@ build on it — this is a from-scratch rewrite.
   - `store.py` — `TranslationStore`: select docs needing translation, write sets/parts.
   - `discovery.py` — loads a translator by module name (`--translator`, default `dispatch`).
   - `markdown.py` — HTML→Markdown (markdownify).
-  - `translators/` — one file per translator (`dispatch`, `email`, `text`, `pdf`); each exposes `translator = <Class>()`.
+  - `translators/` — one file per translator (`dispatch`, `email`, `text`, `pdf`, `docx`); each exposes `translator = <Class>()`.
 - `rag/embed/` — module 3:
   - `models.py` — embedding model registry (`ModelSpec`; dense backends `openai`/`ollama`, sparse backend `bm25`).
   - `backends.py` — dense embed via OpenAI-compatible or native Ollama (stdlib HTTP); `sparse.py` — local BM25 term-frequency vectors.

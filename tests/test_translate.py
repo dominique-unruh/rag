@@ -82,6 +82,71 @@ def test_pdf_translator_returns_single_part() -> None:
     assert len(result) == 1 and result[0].doc_id == "p"
 
 
+def _minimal_docx(body_xml: str) -> bytes:
+    """Build a minimal valid .docx (OOXML zip) whose body is ``body_xml``."""
+    import zipfile
+
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Override PartName="/word/document.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        "</Types>"
+    )
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        'Target="word/document.xml"/></Relationships>'
+    )
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{body_xml}</w:body></w:document>"
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", rels)
+        archive.writestr("word/document.xml", document)
+    return buf.getvalue()
+
+
+def test_docx_translator_converts_to_markdown() -> None:
+    """The docx translator maps Word styles to Markdown (headings, bold)."""
+    pytest.importorskip("mammoth")
+    from rag.translate.translators.docx import translator as docx_translator
+
+    body = (
+        '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>My Title</w:t></w:r></w:p>'
+        "<w:p><w:r><w:t>Hello </w:t></w:r>"
+        "<w:r><w:rPr><w:b/></w:rPr><w:t>bold</w:t></w:r>"
+        "<w:r><w:t> world.</w:t></w:r></w:p>"
+    )
+    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    doc = Document("dx", [], _minimal_docx(body), {"mime-type": mime}, {})
+    result = docx_translator.translate(doc)
+    assert len(result) == 1 and result[0].doc_id == "dx"
+    assert result[0].text == "# My Title\n\nHello **bold** world."
+
+
+def test_dispatch_routes_docx_and_dotx() -> None:
+    """Dispatch routes both the docx and dotx (template) mime types to Docx."""
+    pytest.importorskip("mammoth")
+    body = "<w:p><w:r><w:t>plain para</w:t></w:r></w:p>"
+    for mime in (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.template",
+    ):
+        doc = Document("d", [], _minimal_docx(body), {"mime-type": mime}, {})
+        parts = dispatch.translate(doc)
+        assert len(parts) == 1
+        assert parts[0].text == "plain para"
+        assert parts[0].debug_info == "Dispatched to Docx"
+
+
 def test_dispatch_unknown_mime_yields_nothing() -> None:
     """An unhandled mime type produces no translation."""
     doc = Document("d", [], b"\x00\x01", {"mime-type": "application/octet-stream"}, {})

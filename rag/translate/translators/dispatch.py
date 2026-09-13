@@ -17,6 +17,14 @@ _TEXT_TYPES: frozenset[str] = frozenset(
     {"text/plain", "text/markdown", "text/html", "application/xhtml+xml"}
 )
 
+# Word OOXML mime types handled by the `docx` translator (document + template).
+_DOCX_TYPES: frozenset[str] = frozenset(
+    {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.template",
+    }
+)
+
 # Mime types deliberately dropped (no indexable content) — routed to `ignore`,
 # so they are silently skipped rather than warned about. Cryptographic signature
 # parts: S/MIME (both the `x-` and IANA-registered spellings) and PGP.
@@ -43,6 +51,8 @@ class Dispatch(Translator):
             from .text import translator as target
         elif mime == "application/pdf":
             from .pdf import translator as target
+        elif mime in _DOCX_TYPES:
+            from .docx import translator as target
         elif mime in _IGNORE_TYPES:
             from .ignore import translator as target
         else:
