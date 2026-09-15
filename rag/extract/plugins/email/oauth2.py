@@ -14,19 +14,31 @@ Token model (see the discussion in PLAN §10):
   refresh token on most refreshes, so the freshly returned one is written back
   every time; losing that write eventually strands the account on a stale token.
 
-The very first login uses the OAuth2 **device-code flow** (RFC 8628): the CLI
-prints a URL + short code, the user approves in any browser, and the resulting
-refresh token seeds the ``secrets/`` store. Every later run refreshes silently.
+The very first login is interactive. The **authorization-code flow with a
+loopback redirect and PKCE** (RFC 8252) is preferred: the CLI opens the system
+browser, the user signs in, and the browser redirects to a short-lived
+``http://localhost:<port>`` listener the CLI runs to capture the auth code. This
+is what desktop mail clients (e.g. Thunderbird) actually use, and — crucially —
+many locked-down M365 tenants block the *device-code* flow via Conditional Access
+("authentication flow restricted by your admin") while still permitting this
+interactive browser sign-in. The **device-code flow** (RFC 8628) remains as a
+fallback for headless hosts with no launchable browser. Either way the resulting
+refresh token seeds the ``secrets/`` store and every later run refreshes silently.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import http.server
 import json
+import secrets
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -56,16 +68,24 @@ _DEFAULT_SCOPES: tuple[str, ...] = (
 )
 
 # Microsoft identity-platform endpoint templates (v2.0). ``{tenant}`` is filled
-# from config; both the device-code and token exchanges hit this same host.
+# from config; the authorize, device-code and token exchanges hit this same host.
+_AUTHORIZE_URL: str = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize"
 _DEVICECODE_URL: str = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode"
 _TOKEN_URL: str = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
 
 # Grant type identifier for the RFC 8628 device-code token poll.
 _DEVICE_GRANT: str = "urn:ietf:params:oauth:grant-type:device_code"
 
+# Grant type identifier for the RFC 6749 authorization-code exchange.
+_AUTH_GRANT: str = "authorization_code"
+
 # Network timeout (seconds) for the token/device HTTP calls. Deliberately short:
 # these are small requests to a highly-available endpoint.
 _HTTP_TIMEOUT: float = 30.0
+
+# How long (seconds) to wait for the user to complete the interactive browser
+# sign-in and for the redirect to reach the loopback listener before giving up.
+_REDIRECT_TIMEOUT: float = 300.0
 
 
 def _post_form(url: str, fields: Mapping[str, str]) -> dict[str, Any]:
@@ -207,6 +227,175 @@ def _refresh_access_token(
     )
 
 
+def _pkce_pair() -> tuple[str, str]:
+    """Return a fresh ``(code_verifier, code_challenge)`` PKCE pair (S256).
+
+    The verifier is a high-entropy URL-safe random string; the challenge is the
+    base64url-encoded SHA-256 of the verifier with padding stripped, per RFC 7636.
+    PKCE lets a *public* client (no secret) exchange the auth code securely.
+    """
+    # 64 random bytes -> ~86 url-safe chars, well within the 43..128 RFC range.
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
+
+
+class _CallbackServer(http.server.HTTPServer):
+    """Loopback HTTP server that captures a single OAuth2 redirect callback.
+
+    The redirect lands as a browser ``GET http://localhost:<port>/?code=...``;
+    the handler stashes the parsed query params here for the caller to read.
+    """
+
+    # Parsed query params of the captured redirect, or ``None`` until one arrives.
+    result: dict[str, list[str]] | None
+
+    def __init__(self, address: tuple[str, int], handler: type[http.server.BaseHTTPRequestHandler]) -> None:
+        """Bind the loopback server and initialise the empty result slot."""
+        super().__init__(address, handler)
+        self.result = None
+
+
+class _CallbackHandler(http.server.BaseHTTPRequestHandler):
+    """One-shot handler: record the auth-code redirect and show a closing page."""
+
+    def do_GET(self) -> None:  # noqa: N802 (name mandated by BaseHTTPRequestHandler)
+        """Capture the ``code``/``error`` redirect; ignore incidental requests."""
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        # Browsers also fetch /favicon.ico etc.; only a request carrying the
+        # auth-code (or an error) is the redirect we are waiting for.
+        if "code" not in params and "error" not in params:
+            self.send_response(404)
+            self.end_headers()
+            return
+        # Hand the params up to the server instance for the polling loop to read.
+        server: _CallbackServer = self.server  # type: ignore[assignment]
+        server.result = params
+        body = (
+            b"<html><body><h3>Sign-in complete.</h3>"
+            b"<p>You may close this tab and return to the terminal.</p>"
+            b"</body></html>"
+        )
+        self.send_response(200 if "code" in params else 400)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 (base API name)
+        """Silence the default stderr access log; it would clutter CLI output."""
+
+
+def _browser_available() -> bool:
+    """Return whether a launchable web browser exists for the auth-code flow.
+
+    Falls back to the device-code flow when this is ``False`` (e.g. a headless
+    server with no ``$DISPLAY`` and no registered browser).
+    """
+    try:
+        webbrowser.get()
+        return True
+    except webbrowser.Error:
+        return False
+
+
+def _auth_code_login(
+    tenant: str,
+    client_id: str,
+    client_secret: str | None,
+    scopes: Sequence[str],
+) -> tuple[str, str]:
+    """Run the RFC 8252 auth-code + PKCE loopback flow; return ``(access, refresh)``.
+
+    Binds an ephemeral ``http://localhost:<port>`` listener, opens the system
+    browser at the authorize endpoint, waits for the redirect carrying the auth
+    code, then exchanges that code (with the PKCE verifier) for tokens. Preferred
+    over device-code because Conditional Access often blocks device-code while
+    allowing interactive browser sign-in. Honours a graceful interrupt / timeout
+    while waiting for the user.
+    """
+    verifier, challenge = _pkce_pair()
+    # Opaque value echoed back in the redirect; guards against a stray/forged callback.
+    state = secrets.token_urlsafe(16)
+
+    # 1. Bind the loopback listener on an OS-assigned port BEFORE building the URL,
+    #    since the redirect_uri must carry that exact port. 127.0.0.1 is reached via
+    #    the registered ``http://localhost`` redirect (Microsoft allows any port).
+    server = _CallbackServer(("127.0.0.1", 0), _CallbackHandler)
+    # handle_request() returns after this long without a request, so the poll loop
+    # can re-check the interrupt flag and deadline between browser round-trips.
+    server.timeout = 1.0
+    try:
+        port = server.server_address[1]
+        redirect_uri = f"http://localhost:{port}"
+
+        # 2. Build the authorize URL and send the user there.
+        query = urllib.parse.urlencode(
+            {
+                "client_id": client_id,
+                "response_type": "code",
+                "redirect_uri": redirect_uri,
+                "scope": " ".join(scopes),
+                "state": state,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            }
+        )
+        authorize_url = f"{_AUTHORIZE_URL.format(tenant=tenant)}?{query}"
+        print(
+            "Opening your browser to sign in. If it does not open, visit this URL "
+            f"manually:\n{authorize_url}",
+            file=sys.stderr,
+        )
+        # Best-effort auto-open; the printed URL covers the case where it fails.
+        webbrowser.open(authorize_url)
+
+        # 3. Serve requests until the redirect arrives, the user interrupts, or we
+        #    time out waiting for them to finish in the browser.
+        deadline = time.monotonic() + _REDIRECT_TIMEOUT
+        while server.result is None:
+            if interrupt_requested():
+                raise PluginError("OAuth2 browser login interrupted before completion")
+            if time.monotonic() > deadline:
+                raise PluginError("OAuth2 browser login timed out waiting for sign-in")
+            server.handle_request()
+        params = server.result
+    finally:
+        # Release the port promptly regardless of outcome.
+        server.server_close()
+
+    # 4. Validate the callback: an OAuth2 error, a mismatched state, or a missing
+    #    code all mean we must not proceed to the token exchange.
+    if "error" in params:
+        raise PluginError(
+            f"OAuth2 browser login failed: {params['error'][0]}: "
+            f"{params.get('error_description', [''])[0]}"
+        )
+    if params.get("state", [None])[0] != state:
+        raise PluginError("OAuth2 browser login failed: redirect state mismatch")
+    code = params["code"][0]
+
+    # 5. Exchange the auth code (+ PKCE verifier) for tokens.
+    fields: dict[str, str] = {
+        "client_id": client_id,
+        "grant_type": _AUTH_GRANT,
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "code_verifier": verifier,
+        "scope": " ".join(scopes),
+    }
+    if client_secret:
+        fields["client_secret"] = client_secret
+    result = _post_form(_TOKEN_URL.format(tenant=tenant), fields)
+    if "access_token" not in result:
+        raise PluginError(
+            f"OAuth2 code exchange failed: {result.get('error')}: "
+            f"{result.get('error_description', '')}"
+        )
+    return str(result["access_token"]), str(result.get("refresh_token", ""))
+
+
 def _device_code_login(
     tenant: str,
     client_id: str,
@@ -270,6 +459,29 @@ def _device_code_login(
         )
 
 
+def _interactive_login(
+    tenant: str,
+    client_id: str,
+    client_secret: str | None,
+    scopes: Sequence[str],
+) -> tuple[str, str]:
+    """Run whichever interactive login the environment supports.
+
+    Prefers the auth-code loopback flow (works even on Conditional-Access tenants
+    that block device-code); falls back to the device-code flow only when no
+    browser can be launched, e.g. a headless host.
+    """
+    if _browser_available():
+        return _auth_code_login(tenant, client_id, client_secret, scopes)
+    # No launchable browser: the loopback redirect could never arrive, so use the
+    # copy-a-code device flow instead (note: some tenants block this one).
+    print(
+        "No usable web browser found; falling back to the device-code flow.",
+        file=sys.stderr,
+    )
+    return _device_code_login(tenant, client_id, client_secret, scopes)
+
+
 def access_token(
     account: Mapping[str, Any],
     secrets_dir: Path,
@@ -283,8 +495,9 @@ def access_token(
     1. If a refresh token is stored under ``secrets_dir``, silently exchange it
        for a fresh access token (persisting the rotated refresh token).
     2. Otherwise — or if the stored token is no longer valid — run the interactive
-       device-code login, but only when ``allow_prompt`` (a TTY is available);
-       headless runs raise instead of blocking on a login they cannot complete.
+       login (auth-code loopback, or device-code when no browser is available),
+       but only when ``allow_prompt`` (a TTY is available); headless runs raise
+       instead of blocking on a login they cannot complete.
 
     The returned access token is ephemeral and kept only by the caller for the
     duration of the IMAP connection.
@@ -304,14 +517,14 @@ def access_token(
             return access
         # Stored token rejected (expired/revoked) -> fall through to a fresh login.
 
-    # 2. No usable refresh token: interactive device-code login (TTY only).
+    # 2. No usable refresh token: interactive login (TTY only).
     if not allow_prompt:
         raise PluginError(
             f"account {account_id!r} needs an interactive OAuth2 login but none is "
             f"possible (no TTY). Run `rag extract email account={account_id}` once "
             f"in a terminal to authorise it, then re-run headless."
         )
-    access, new_refresh = _device_code_login(tenant, client_id, client_secret, scopes)
+    access, new_refresh = _interactive_login(tenant, client_id, client_secret, scopes)
     if not new_refresh:
         # Without offline_access the server returns no refresh token; every run
         # would then require a fresh interactive login — treat as misconfig.

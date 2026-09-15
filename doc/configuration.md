@@ -38,9 +38,13 @@ libmagic1`). This plugin uses no secrets.
 Some IMAP servers no longer accept passwords and require OAuth2 bearer tokens via
 SASL `XOAUTH2`.
 
-- A one-time interactive **device-code** login seeds a long-lived **refresh
-  token**; every run exchanges it for a short-lived access token used for
-  `XOAUTH2`.
+- A one-time interactive login seeds a long-lived **refresh token**; every run
+  exchanges it for a short-lived access token used for `XOAUTH2`. The login uses
+  the **authorization-code + PKCE loopback** flow (opens the system browser,
+  captures the redirect on a temporary `http://localhost:<port>` listener) — this
+  works even on tenants whose Conditional Access **blocks the device-code flow**
+  ("authentication flow restricted by your admin"). The **device-code** flow is
+  kept as a fallback for headless hosts with no launchable browser.
 - The access token is ephemeral (in-memory only); the refresh token is persisted —
   and rewritten whenever the server rotates it — as one file per account under the
   email plugin's `secrets/` state subdirectory (not the keyring, since it is
