@@ -199,6 +199,48 @@ def test_dispatch_routes_xlsx() -> None:
         assert parts[0].text.startswith("## Sales")
 
 
+def _make_xls() -> bytes:
+    """Build an in-memory legacy .xls (BIFF) mirroring ``_make_xlsx``'s data sheet."""
+    import xlwt
+
+    wb = xlwt.Workbook()
+    ws = wb.add_sheet("Sales")
+    ws.write(0, 0, "Item")
+    ws.write(0, 1, "Qty")
+    ws.write(1, 0, "Widget | A")  # pipe must be escaped
+    ws.write(1, 1, 3)             # int -> xlrd number 3.0 -> "3"
+    ws.write(2, 0, "Gadget")      # (2, 1) left empty
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_xls_translator_renders_markdown_tables() -> None:
+    """The xlsx translator reads a legacy .xls via xlrd into the same Markdown table."""
+    from rag.translate.translators.xlsx import translator as xlsx_translator
+
+    mime = "application/vnd.ms-excel"
+    doc = Document("xl", [], _make_xls(), {"mime-type": mime}, {})
+    result = xlsx_translator.translate(doc)
+    assert len(result) == 1 and result[0].doc_id == "xl"
+    assert result[0].text == (
+        "## Sales\n"
+        "| Item | Qty |\n"
+        "| --- | --- |\n"
+        "| Widget \\| A | 3 |\n"
+        "| Gadget |  |"
+    )
+
+
+def test_dispatch_routes_xls() -> None:
+    """Dispatch routes the legacy .xls mime (application/vnd.ms-excel) to Xlsx."""
+    doc = Document("xl", [], _make_xls(), {"mime-type": "application/vnd.ms-excel"}, {})
+    parts = dispatch.translate(doc)
+    assert len(parts) == 1
+    assert parts[0].debug_info == "Dispatched to Xlsx"
+    assert parts[0].text.startswith("## Sales")
+
+
 def _make_pptx() -> bytes:
     """Build an in-memory .pptx: a text slide (+notes), a table slide, an empty one."""
     from pptx import Presentation

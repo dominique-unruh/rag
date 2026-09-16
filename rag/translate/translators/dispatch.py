@@ -62,16 +62,18 @@ _DOCX_TYPES: frozenset[str] = frozenset(
     }
 )
 
-# Excel OOXML mime types handled by the `xlsx` translator (workbook + template).
-# The macro-enabled variants (.xlsm/.xltm) are the same spreadsheetml package with
-# an added VBA project that openpyxl ignores. The binary .xlsb (a different, non-XML
-# format openpyxl cannot read) is deliberately left out.
+# Excel mime types handled by the `xlsx` translator. The OOXML workbook + template
+# and their macro-enabled (.xlsm/.xltm) variants are the same spreadsheetml package
+# with an optional added VBA project that openpyxl ignores. `application/vnd.ms-excel`
+# is the legacy binary .xls (BIFF) format, which the translator reads via xlrd. The
+# binary .xlsb (a different, non-XML OOXML format openpyxl cannot read) is left out.
 _XLSX_TYPES: frozenset[str] = frozenset(
     {
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.template",
         "application/vnd.ms-excel.sheet.macroenabled.12",
         "application/vnd.ms-excel.template.macroenabled.12",
+        "application/vnd.ms-excel",
     }
 )
 
