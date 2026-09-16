@@ -668,3 +668,29 @@ def test_run_translation_inspect(tmp_path: Path, capsys: pytest.CaptureFixture[s
     # Nothing was written to the DB in inspection mode.
     assert db.conn.execute("SELECT COUNT(*) FROM translation_sets").fetchone()[0] == 0
     db.close()
+
+
+def test_run_translation_isolates_failing_document(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One document whose translation raises is logged and skipped, not fatal."""
+    storage = tmp_path / "storage"
+    db = Database.open(storage / "metadata.db")
+    blobs = BlobStore(storage / "blobs")
+    src = SqliteStore(db.conn, blobs, "email")
+    # A good email plus a zero-byte "PDF": pypdf raises EmptyFileError on the latter.
+    src.upsert("good", _EMAIL, {"mime-type": "message/rfc822"})
+    src.upsert("bad", b"", {"mime-type": "application/pdf"})
+    config = Config({"storage": {"dir": str(storage)}}, tmp_path / "config.yaml")
+
+    # Real (non-inspect, non-dry) run so the write path is exercised too.
+    processed = run_translation(config, TranslateOptions(), db=db)
+
+    # Only the good document counts; the whole pass did not abort.
+    assert processed == 1
+    err = capsys.readouterr().err
+    assert "error: translating email:bad" in err and "skipping" in err
+    # The good document was written; the bad one left nothing behind.
+    rows = db.conn.execute("SELECT doc_id FROM translation_sets WHERE is_active=1").fetchall()
+    assert [r[0] for r in rows] == ["good"]
+    db.close()

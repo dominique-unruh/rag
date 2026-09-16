@@ -143,31 +143,50 @@ def run_translation(
                 stable_metadata=source.stable_metadata,
                 transient_metadata=source.transient_metadata,
             )
-            translations = translator.translate(document)
-            _validate(source, translations)
+            # Isolate each document: a single malformed source (an empty/corrupt
+            # PDF, an unreadable archive member, …) must not abort the whole pass.
+            # On any translator/validation/write error we log and skip to the next
+            # document. Only ``Exception`` is caught, so KeyboardInterrupt and the
+            # graceful-interrupt path below still propagate.
+            try:
+                translations = translator.translate(document)
+                _validate(source, translations)
 
-            if options.verbose and not options.inspect:
-                # One progress line per document (inspect mode already dumps them).
-                sub_ids = ", ".join("/".join(t.sub_doc_id) or "(root)" for t in translations)
-                prefix = "would translate" if options.dry_run else "translated"
+                if options.verbose and not options.inspect:
+                    # One progress line per document (inspect mode already dumps them).
+                    sub_ids = ", ".join(
+                        "/".join(t.sub_doc_id) or "(root)" for t in translations
+                    )
+                    prefix = "would translate" if options.dry_run else "translated"
+                    print(
+                        f"{prefix} {source.source_type}:{source.doc_id} (v{source.version}) "
+                        f"-> {len(translations)} part(s) [{sub_ids}] via {options.translator}",
+                        file=sys.stderr,
+                    )
+
+                if options.inspect:
+                    _report(source, translations)
+                elif not options.dry_run:
+                    # Persist as one active translation set (deactivates the old one).
+                    store.write_set(
+                        source_type=source.source_type,
+                        doc_id=source.doc_id,
+                        source_version=source.version,
+                        translator_name=options.translator,
+                        git_rev=git_rev,
+                        parts=[
+                            (t.sub_doc_id, t.text, t.stable_metadata) for t in translations
+                        ],
+                    )
+            except Exception as exc:
+                # Report the offending document and its error, then move on. The
+                # source stays "needing translation" so a later pass can retry it.
                 print(
-                    f"{prefix} {source.source_type}:{source.doc_id} (v{source.version}) "
-                    f"-> {len(translations)} part(s) [{sub_ids}] via {options.translator}",
+                    f"error: translating {source.source_type}:{source.doc_id} "
+                    f"(v{source.version}) failed: {exc}; skipping",
                     file=sys.stderr,
                 )
-
-            if options.inspect:
-                _report(source, translations)
-            elif not options.dry_run:
-                # Persist as one active translation set (deactivates the old one).
-                store.write_set(
-                    source_type=source.source_type,
-                    doc_id=source.doc_id,
-                    source_version=source.version,
-                    translator_name=options.translator,
-                    git_rev=git_rev,
-                    parts=[(t.sub_doc_id, t.text, t.stable_metadata) for t in translations],
-                )
+                continue
             processed += 1
             # Checkpoint: a document is fully translated and (if storing) committed
             # here — a safe point to honour a graceful interrupt.
