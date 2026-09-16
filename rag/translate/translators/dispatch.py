@@ -66,6 +66,27 @@ _XLSX_TYPES: frozenset[str] = frozenset(
     }
 )
 
+# Container/archive mime types handled by the `archive` translator, which unpacks
+# them and dispatches each contained file. Covers ZIP, the TAR family, the
+# standalone gzip/bzip2/xz compression streams (all stdlib-decodable), plus 7z and
+# RAR (via py7zr / rarfile). The archive translator sniffs the real format from the
+# content, so the exact spelling here only has to be broad enough to route to it.
+_ARCHIVE_TYPES: frozenset[str] = frozenset(
+    {
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/x-tar",
+        "application/gzip",
+        "application/x-gzip",
+        "application/x-bzip2",
+        "application/x-xz",
+        "application/x-7z-compressed",
+        "application/vnd.rar",
+        "application/x-rar-compressed",
+        "application/x-rar",
+    }
+)
+
 # Mime types deliberately dropped (no indexable content) — routed to `ignore`,
 # so they are silently skipped rather than warned about. Cryptographic signature
 # parts: S/MIME (both the `x-` and IANA-registered spellings) and PGP.
@@ -96,6 +117,8 @@ class Dispatch(Translator):
             from .docx import translator as target
         elif mime in _XLSX_TYPES:
             from .xlsx import translator as target
+        elif mime in _ARCHIVE_TYPES:
+            from .archive import translator as target
         elif mime in _IGNORE_TYPES:
             from .ignore import translator as target
         elif _looks_like_text(mime, document.content):

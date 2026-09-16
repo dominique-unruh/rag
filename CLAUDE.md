@@ -19,6 +19,7 @@ build on it — this is a from-scratch rewrite.
 - `rag/config.py` — central YAML config; each plugin gets its own subtree.
 - `rag/secrets.py` — secret resolution: keyring → file → prompt. Never in YAML.
 - `rag/timestamps.py` — shared timestamp parsing (`1d ago`, ISO 8601, `today`, …).
+- `rag/mime.py` — shared libmagic-based mime detection (`MimeDetector`); used by the documents extractor and the archive translator.
 - `rag/blobs.py` — content-addressed blob store on the filesystem (SHA-256, sharded, immutable).
 - `rag/db.py` — SQLite (WAL) connection + schema + forward-only migrations (via `PRAGMA user_version`).
 - `rag/extract/` — module 1:
@@ -37,7 +38,7 @@ build on it — this is a from-scratch rewrite.
   - `store.py` — `TranslationStore`: select docs needing translation, write sets/parts.
   - `discovery.py` — loads a translator by module name (`--translator`, default `dispatch`).
   - `markdown.py` — HTML→Markdown (markdownify).
-  - `translators/` — one file per translator (`dispatch`, `email`, `text`, `pdf`, `docx`, `xlsx`); each exposes `translator = <Class>()`.
+  - `translators/` — one file per translator (`dispatch`, `email`, `text`, `pdf`, `docx`, `xlsx`, `archive`); each exposes `translator = <Class>()`. `archive` unpacks ZIP/TAR/gzip/bzip2/xz (stdlib) and 7z/RAR (py7zr/rarfile) containers in memory, emits a Markdown table-of-contents part, then re-dispatches each contained file (one bad member is skipped, not fatal).
 - `rag/embed/` — module 3:
   - `models.py` — embedding model registry (`ModelSpec`; dense backends `openai`/`ollama`, sparse backend `bm25`).
   - `backends.py` — dense embed via OpenAI-compatible or native Ollama (stdlib HTTP); `sparse.py` — local BM25 term-frequency vectors.

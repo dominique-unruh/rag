@@ -191,6 +191,165 @@ def test_dispatch_routes_xlsx() -> None:
     assert parts[0].text.startswith("## Sales")
 
 
+def _make_zip() -> bytes:
+    """Build an in-memory .zip: a text file, a nested dir, and a directory entry."""
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr("readme.txt", "hello from zip")
+        archive.writestr("docs/note.md", "# Heading\n\nbody")
+        archive.writestr("emptydir/", "")  # a directory entry: must be skipped
+    return buf.getvalue()
+
+
+def test_archive_translator_unpacks_zip() -> None:
+    """The archive translator dispatches each contained file (skipping dirs)."""
+    from rag.translate.translators.archive import translator as archive_translator
+
+    doc = Document("z", [], _make_zip(), {"mime-type": "application/zip"}, {})
+    parts = archive_translator.translate(doc)
+    by_sub = {tuple(p.sub_doc_id): p for p in parts}
+    # A leading TOC part plus the two files; the directory entry produced nothing.
+    assert set(by_sub) == {("toc",), ("readme.txt",), ("docs/note.md",)}
+    assert by_sub[("readme.txt",)].text == "hello from zip"
+    assert by_sub[("docs/note.md",)].text == "# Heading\n\nbody"
+    # The TOC is emitted first and lists every file.
+    assert parts[0].sub_doc_id == ["toc"]
+    assert "readme.txt" in parts[0].text and "docs/note.md" in parts[0].text
+
+
+def test_archive_toc_survives_untranslatable_members() -> None:
+    """Even when every member is untranslatable, the TOC still yields a part."""
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        # A binary (NUL-containing) blob dispatch cannot translate.
+        archive.writestr("image.bin", b"\x00\x01\x02\x03")
+    doc = Document("b", [], buf.getvalue(), {"mime-type": "application/zip"}, {})
+    parts = dispatch.translate(doc)
+    # Only the TOC remains, and it names the otherwise-lost binary member.
+    assert [p.sub_doc_id for p in parts] == [["toc"]]
+    assert "image.bin" in parts[0].text
+
+
+def test_archive_tolerates_a_corrupt_member() -> None:
+    """A member that crashes its translator is skipped, not fatal to the archive."""
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr("broken.pdf", b"%PDF-1.4 truncated garbage")  # crashes pypdf
+        archive.writestr("ok.txt", "still here")
+    doc = Document("c", [], buf.getvalue(), {"mime-type": "application/zip"}, {})
+    parts = dispatch.translate(doc)
+    by_sub = {tuple(p.sub_doc_id): p for p in parts}
+    # The good file and the TOC survive; the corrupt PDF is dropped.
+    assert set(by_sub) == {("toc",), ("ok.txt",)}
+    assert by_sub[("ok.txt",)].text == "still here"
+    assert "broken.pdf" in by_sub[("toc",)].text  # still listed in the TOC
+
+
+def test_dispatch_routes_zip() -> None:
+    """Dispatch routes a zip mime type to Archive, extending sub_doc_ids and trace."""
+    doc = Document("z", [], _make_zip(), {"mime-type": "application/zip"}, {})
+    parts = dispatch.translate(doc)
+    by_sub = {tuple(p.sub_doc_id): p for p in parts}
+    assert set(by_sub) == {("toc",), ("readme.txt",), ("docs/note.md",)}
+    # Inner dispatch -> Text, then outer dispatch -> Archive.
+    assert by_sub[("readme.txt",)].debug_info == "Dispatched to Text\nDispatched to Archive"
+
+
+def test_archive_translator_unpacks_tar_gz() -> None:
+    """A gzip-compressed tar is unpacked into its file members (not one gzip blob)."""
+    import io as _io
+    import tarfile
+
+    buf = _io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as archive:
+        payload = b"tarred text"
+        info = tarfile.TarInfo("a/b.txt")
+        info.size = len(payload)
+        archive.addfile(info, _io.BytesIO(payload))
+    doc = Document("t", [], buf.getvalue(), {"mime-type": "application/gzip"}, {})
+    parts = dispatch.translate(doc)
+    by_sub = {tuple(p.sub_doc_id): p for p in parts}
+    assert set(by_sub) == {("toc",), ("a/b.txt",)}
+    assert by_sub[("a/b.txt",)].text == "tarred text"
+    assert "a/b.txt" in by_sub[("toc",)].text
+
+
+def test_archive_translator_unpacks_gzip_stream() -> None:
+    """A standalone gzip stream yields one part named by the stripped filename."""
+    import gzip
+
+    doc = Document(
+        "g", [], gzip.compress(b"plain gz body"),
+        {"mime-type": "application/gzip", "filename": "notes.txt.gz"}, {},
+    )
+    parts = dispatch.translate(doc)
+    assert len(parts) == 1
+    assert parts[0].sub_doc_id == ["notes.txt"]  # ".gz" stripped
+    assert parts[0].text == "plain gz body"
+
+
+def test_archive_translator_nested_zip() -> None:
+    """A zip inside a zip is unpacked recursively via dispatch."""
+    import zipfile
+
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w") as archive:
+        archive.writestr("deep.txt", "deep content")
+    outer = io.BytesIO()
+    with zipfile.ZipFile(outer, "w") as archive:
+        archive.writestr("inner.zip", inner.getvalue())
+    doc = Document("n", [], outer.getvalue(), {"mime-type": "application/zip"}, {})
+    parts = dispatch.translate(doc)
+    by_sub = {tuple(p.sub_doc_id): p for p in parts}
+    # Outer TOC, the inner archive's own TOC, and the deep file.
+    assert set(by_sub) == {("toc",), ("inner.zip", "toc"), ("inner.zip", "deep.txt")}
+    assert by_sub[("inner.zip", "deep.txt")].text == "deep content"
+
+
+def test_archive_translator_unpacks_7z() -> None:
+    """A 7-Zip archive is unpacked and each file member dispatched."""
+    import py7zr
+
+    buf = io.BytesIO()
+    with py7zr.SevenZipFile(buf, "w") as archive:
+        archive.writestr("hello 7z", "a.txt")
+        archive.writestr("# H\n\nbody", "docs/b.md")
+    doc = Document("s", [], buf.getvalue(), {"mime-type": "application/x-7z-compressed"}, {})
+    parts = dispatch.translate(doc)
+    by_sub = {tuple(p.sub_doc_id): p for p in parts}
+    assert set(by_sub) == {("toc",), ("a.txt",), ("docs/b.md",)}
+    assert by_sub[("a.txt",)].text == "hello 7z"
+    assert by_sub[("a.txt",)].debug_info == "Dispatched to Text\nDispatched to Archive"
+
+
+# A tiny real RAR5 archive (base64): files ``a.txt`` = "hello rar" and
+# ``docs/b.md`` = "# H\n\nbody". Committed as bytes because creating a .rar needs
+# the proprietary ``rar`` binary; reading it needs only unrar/bsdtar/unar.
+_RAR_B64 = (
+    "UmFyIRoHAQAzkrXlCgEFBgAFAQGAgADL7qgeIwIDC4kABIkApIMCF8lRhIAAAQVhLnR4dAoD"
+    "E3WJqmrsOj8LaGVsbG8gcmFyOaoYXScCAwuJAASJAKSDAukcIMKAAAEJZG9jcy9iLm1kCgMT"
+    "dYmqauw6PwsjIEgKCmJvZHkdd1ZRAwUEAA=="
+)
+
+
+def test_archive_translator_unpacks_rar() -> None:
+    """A RAR archive is unpacked and each file member dispatched."""
+    import base64
+
+    doc = Document("r", [], base64.b64decode(_RAR_B64), {"mime-type": "application/vnd.rar"}, {})
+    parts = dispatch.translate(doc)
+    by_sub = {tuple(p.sub_doc_id): p for p in parts}
+    assert set(by_sub) == {("toc",), ("a.txt",), ("docs/b.md",)}
+    assert by_sub[("a.txt",)].text == "hello rar"
+    assert by_sub[("docs/b.md",)].text == "# H\n\nbody"
+
+
 def test_dispatch_text_subtype_identity() -> None:
     """An unsupported text/* type (e.g. .tex) is translated as-is via Text."""
     tex = "\\section{Hi}\nbody\n"
@@ -227,7 +386,7 @@ def test_dispatch_ignored_mime_yields_nothing() -> None:
 # --- discovery -----------------------------------------------------------
 def test_discovery() -> None:
     """Built-in translators are discoverable; unknown names raise."""
-    assert {"dispatch", "email", "text", "pdf"} <= set(list_translators())
+    assert {"dispatch", "email", "text", "pdf", "archive"} <= set(list_translators())
     assert load_translator("text") is text_translator
     with pytest.raises(TranslatorError):
         load_translator("does-not-exist")

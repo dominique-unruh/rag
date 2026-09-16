@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import fnmatch
 import json
-import mimetypes
 import os
 import sys
 from collections.abc import Iterable, Mapping
@@ -34,6 +33,7 @@ from typing import Any
 
 from ....errors import ConfigError, PluginError
 from ....interrupt import interrupt_requested
+from ....mime import MimeDetector
 from ....secrets import Secrets
 from ....timestamps import format_timestamp
 from ...base import Extractor, Store
@@ -50,23 +50,6 @@ _SIDECAR_SUFFIX: str = ".metadata.json"
 # Obsidian vault's ``.obsidian/``), editor backups and transient temp files. The
 # config ``exclude`` list extends (never replaces) these.
 _DEFAULT_EXCLUDES: tuple[str, ...] = (".*", "*~", "*.swp", "*.tmp", "*.part", "#*#")
-
-# Returned when neither libmagic nor the extension can name a type.
-_FALLBACK_MIME: str = "application/octet-stream"
-
-# Extension -> mime overrides applied before ``mimetypes.guess_type`` so the
-# result does not depend on the host's ``mime.types``. libmagic content-sniffs
-# markdown as plain ``text/plain`` (it has no markdown rule), so the extension is
-# the only reliable signal for it.
-_EXT_MIME: dict[str, str] = {
-    ".md": "text/markdown",
-    ".markdown": "text/markdown",
-}
-
-# Mime types libmagic emits when it can only tell "this is text" / "this is
-# bytes". When magic returns one of these but the extension names something more
-# specific, prefer the extension (that is subtype correctness, not a fallback).
-_GENERIC_MIMES: frozenset[str] = frozenset({"text/plain", "application/octet-stream"})
 
 # Every option key the documents extractor accepts. A key=value token outside
 # this set is rejected so a typo fails loudly instead of being ignored.
@@ -110,58 +93,24 @@ def _folders_from_config(config: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return folders
 
 
-def _require_magic() -> Any:
-    """Import and return the ``magic`` module, or fail loudly with an install hint.
+def _sniff_mime(
+    detector: MimeDetector, path: Path, data: bytes, sidecar: Mapping[str, Any] | None
+) -> str:
+    """Determine the mime type for a file: sidecar override, else content sniff.
 
-    Content sniffing is a hard requirement — the plugin never silently downgrades
-    to extension-only detection. The import is deliberately lazy (here, not at
-    module top) so a missing libmagic breaks only ``rag extract documents`` and
-    not plugin discovery or the other extractors.
+    An explicit sidecar ``content_type`` wins verbatim; otherwise the shared
+    :class:`MimeDetector` content-sniffs the bytes (libmagic), falling back to the
+    file's extension only when magic is uninformative. Content sniffing is a hard
+    requirement — the plugin never silently downgrades to extension-only detection.
     """
-    try:
-        import magic  # type: ignore[import-untyped]
-    except ImportError as exc:  # module missing, or libmagic shared lib absent
-        raise PluginError(
-            "the documents extractor needs libmagic for mime detection. "
-            "Install the Python binding ('pip install python-magic') and the "
-            "system library (e.g. 'apt install libmagic1' / 'brew install libmagic')."
-        ) from exc
-    return magic
-
-
-def _ext_mime(path: Path) -> str | None:
-    """Return an extension-based mime type for ``path``, or ``None`` if unknown."""
-    # Our built-in overrides win over the system mime.types database.
-    override = _EXT_MIME.get(path.suffix.lower())
-    if override is not None:
-        return override
-    guessed, _encoding = mimetypes.guess_type(path.name)
-    return guessed
-
-
-def _sniff_mime(magic: Any, path: Path, data: bytes, sidecar: Mapping[str, Any] | None) -> str:
-    """Determine the mime type for a file, combining sidecar, magic and extension.
-
-    Precedence: an explicit sidecar ``content_type`` wins; otherwise libmagic
-    content-sniffs the bytes, but when magic can only say "text/plain" or
-    "octet-stream" and the extension names something more specific (e.g.
-    markdown), the extension is used. ``_FALLBACK_MIME`` is the last resort.
-    """
-    # 1. The source declared a type in its sidecar — trust it verbatim.
+    # The source declared a type in its sidecar — trust it verbatim.
     if sidecar is not None:
         declared = sidecar.get("content_type")
         if isinstance(declared, str) and declared.strip():
             return declared.strip()
-
-    # 2. Content sniff (required) plus the extension guess.
-    magic_mime = magic.from_buffer(data, mime=True) if data else None
-    ext_mime = _ext_mime(path)
-
-    # 3. Prefer the extension only when magic is uninformative but the extension
-    #    is specific; otherwise magic wins, then extension, then the fallback.
-    if magic_mime in _GENERIC_MIMES and ext_mime is not None and ext_mime not in _GENERIC_MIMES:
-        return ext_mime
-    return magic_mime or ext_mime or _FALLBACK_MIME
+    # Otherwise delegate to the shared detector (magic + extension fallback), the
+    # same logic the archive translator uses for files it unpacks.
+    return detector.detect(path.name, data)
 
 
 def _is_excluded(name: str, patterns: Iterable[str]) -> bool:
@@ -306,7 +255,7 @@ class DocumentsExtractor(Extractor):
                 f"Recognised options: {', '.join(_USER_OPTIONS)}."
             )
         # Fail fast if content sniffing is unavailable (never silently degrade).
-        magic = _require_magic()
+        detector = MimeDetector()
 
         folders = _folders_from_config(config)
         verbose = _truthy(options.get("verbose"))
@@ -339,7 +288,7 @@ class DocumentsExtractor(Extractor):
             # whether we managed to walk the whole folder (needed before we may
             # delete vanished documents).
             seen_ids, completed, remaining = self._sync_folder(
-                store=store, magic=magic, folder_id=folder_id, root=root,
+                store=store, detector=detector, folder_id=folder_id, root=root,
                 excludes=excludes, max_size=max_size, force=force,
                 remaining=remaining, verbose=verbose,
             )
@@ -359,7 +308,7 @@ class DocumentsExtractor(Extractor):
         self,
         *,
         store: Store,
-        magic: Any,
+        detector: MimeDetector,
         folder_id: str,
         root: Path,
         excludes: tuple[str, ...],
@@ -419,7 +368,7 @@ class DocumentsExtractor(Extractor):
                 continue
 
             sidecar = _load_sidecar(sidecar_path)
-            stable = self._build_stable(rel_posix, size, magic, abs_path, content, sidecar)
+            stable = self._build_stable(rel_posix, size, detector, abs_path, content, sidecar)
             transient = {"folder": folder_id, "mtime": mtime}
 
             result = store.upsert(doc_id, content, stable, transient=transient)
@@ -435,7 +384,7 @@ class DocumentsExtractor(Extractor):
         self,
         rel_posix: str,
         size: int,
-        magic: Any,
+        detector: MimeDetector,
         abs_path: Path,
         content: bytes,
         sidecar: Mapping[str, Any] | None,
@@ -451,7 +400,7 @@ class DocumentsExtractor(Extractor):
         stable: dict[str, Any] = dict(sidecar) if sidecar else {}
         stable["path"] = rel_posix
         stable["size"] = size
-        stable["mime-type"] = _sniff_mime(magic, abs_path, content, sidecar)
+        stable["mime-type"] = _sniff_mime(detector, abs_path, content, sidecar)
         return stable
 
     def _delete_vanished(

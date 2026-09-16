@@ -18,6 +18,8 @@ dependencies = [
     "qdrant-client",
     "zstandard",
     "python-magic",
+    "py7zr",
+    "rarfile",
 ]
 
 [project.optional-dependencies]
