@@ -33,7 +33,7 @@ fi
 # explicitly into the venv rather than probing imports, because a venv created
 # with --system-site-packages can satisfy imports from system packages while its
 # own site remains empty.
-_DEPS=(pyyaml keyring secretstorage jeepney flask argcomplete markdownify mammoth openpyxl pypdf qdrant-client zstandard python-magic py7zr rarfile)
+_DEPS=(pyyaml keyring secretstorage jeepney flask argcomplete markdownify mammoth openpyxl python-pptx pypdf qdrant-client zstandard python-magic py7zr rarfile)
 # The sentinel is keyed BOTH by Python version and by the dependency list:
 # - Python version, because a shared .venv used from interpreters of different
 #   versions has separate site-packages (lib/pythonX.Y/…); each version must

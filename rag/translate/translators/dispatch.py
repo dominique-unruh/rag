@@ -66,6 +66,16 @@ _XLSX_TYPES: frozenset[str] = frozenset(
     }
 )
 
+# PowerPoint OOXML mime types handled by the `pptx` translator: the presentation
+# family — deck (.pptx), template (.potx) and slideshow (.ppsx).
+_PPTX_TYPES: frozenset[str] = frozenset(
+    {
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.openxmlformats-officedocument.presentationml.template",
+        "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+    }
+)
+
 # Container/archive mime types handled by the `archive` translator, which unpacks
 # them and dispatches each contained file. Covers ZIP, the TAR family, the
 # standalone gzip/bzip2/xz compression streams (all stdlib-decodable), plus 7z and
@@ -117,6 +127,8 @@ class Dispatch(Translator):
             from .docx import translator as target
         elif mime in _XLSX_TYPES:
             from .xlsx import translator as target
+        elif mime in _PPTX_TYPES:
+            from .pptx import translator as target
         elif mime in _ARCHIVE_TYPES:
             from .archive import translator as target
         elif mime in _IGNORE_TYPES:

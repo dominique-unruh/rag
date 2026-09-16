@@ -38,7 +38,7 @@ build on it — this is a from-scratch rewrite.
   - `store.py` — `TranslationStore`: select docs needing translation, write sets/parts.
   - `discovery.py` — loads a translator by module name (`--translator`, default `dispatch`).
   - `markdown.py` — HTML→Markdown (markdownify).
-  - `translators/` — one file per translator (`dispatch`, `email`, `text`, `pdf`, `docx`, `xlsx`, `archive`); each exposes `translator = <Class>()`. `archive` unpacks ZIP/TAR/gzip/bzip2/xz (stdlib) and 7z/RAR (py7zr/rarfile) containers in memory, emits a Markdown table-of-contents part, then re-dispatches each contained file (one bad member is skipped, not fatal).
+  - `translators/` — one file per translator (`dispatch`, `email`, `text`, `pdf`, `docx`, `xlsx`, `pptx`, `archive`); each exposes `translator = <Class>()`. `pptx` renders a PowerPoint presentation (deck/template/slideshow) as one `## Slide N` section each (shape text, tables, speaker notes) via python-pptx. `archive` unpacks ZIP/TAR/gzip/bzip2/xz (stdlib) and 7z/RAR (py7zr/rarfile) containers in memory, emits a Markdown table-of-contents part, then re-dispatches each contained file (one bad member is skipped, not fatal).
 - `rag/embed/` — module 3:
   - `models.py` — embedding model registry (`ModelSpec`; dense backends `openai`/`ollama`, sparse backend `bm25`).
   - `backends.py` — dense embed via OpenAI-compatible or native Ollama (stdlib HTTP); `sparse.py` — local BM25 term-frequency vectors.

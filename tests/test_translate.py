@@ -191,6 +191,111 @@ def test_dispatch_routes_xlsx() -> None:
     assert parts[0].text.startswith("## Sales")
 
 
+def _make_pptx() -> bytes:
+    """Build an in-memory .pptx: a text slide (+notes), a table slide, an empty one."""
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    prs = Presentation()
+    blank = prs.slide_layouts[6]  # the "Blank" layout: no stray placeholders
+
+    # Slide 1: a multi-paragraph textbox plus speaker notes.
+    s1 = prs.slides.add_slide(blank)
+    tf = s1.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(2)).text_frame
+    tf.text = "Quarterly Review"       # first paragraph
+    tf.add_paragraph().text = "Revenue up"
+    tf.add_paragraph().text = "Costs down"
+    s1.notes_slide.notes_text_frame.text = "remember to smile"
+
+    # Slide 2: a 2x2 table (first row is the header).
+    s2 = prs.slides.add_slide(blank)
+    table = s2.shapes.add_table(2, 2, Inches(1), Inches(1), Inches(4), Inches(1)).table
+    table.cell(0, 0).text = "Metric"
+    table.cell(0, 1).text = "Value"
+    table.cell(1, 0).text = "Users"
+    table.cell(1, 1).text = "42"
+
+    # Slide 3: no shapes at all -> skipped in the output.
+    prs.slides.add_slide(blank)
+
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+def test_pptx_translator_renders_slides() -> None:
+    """The pptx translator emits a section per non-empty slide, with notes + tables."""
+    from rag.translate.translators.pptx import translator as pptx_translator
+
+    mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    doc = Document("pp", [], _make_pptx(), {"mime-type": mime}, {})
+    result = pptx_translator.translate(doc)
+    assert len(result) == 1 and result[0].doc_id == "pp"
+    assert result[0].text == (
+        "## Slide 1\n\n"
+        "Quarterly Review\nRevenue up\nCosts down\n\n"
+        "### Notes\n\n"
+        "remember to smile\n\n"
+        "## Slide 2\n\n"
+        "| Metric | Value |\n"
+        "| --- | --- |\n"
+        "| Users | 42 |"
+    )
+    # The empty third slide contributes no section.
+    assert "## Slide 3" not in result[0].text
+
+
+def _retype_as_template(deck: bytes) -> bytes:
+    """Re-pack a .pptx deck as a .potx template (rewrite its main content type).
+
+    Produces bytes whose ``[Content_Types].xml`` uses the template spelling that
+    python-pptx rejects, so the translator's normalisation path is exercised for
+    real (not just via the routing mime).
+    """
+    import zipfile
+
+    deck_ct = (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
+    )
+    template_ct = (
+        "application/vnd.openxmlformats-officedocument.presentationml.template.main+xml"
+    )
+    src = zipfile.ZipFile(io.BytesIO(deck))
+    ct = src.read("[Content_Types].xml").decode("utf-8").replace(deck_ct, template_ct)
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            data = ct.encode("utf-8") if item.filename == "[Content_Types].xml" else src.read(item.filename)
+            dst.writestr(item, data)
+    return out.getvalue()
+
+
+def test_pptx_translator_handles_template() -> None:
+    """A .potx (template content type) is normalised to a deck and translated."""
+    from rag.translate.translators.pptx import translator as pptx_translator
+
+    mime = "application/vnd.openxmlformats-officedocument.presentationml.template"
+    doc = Document("pt", [], _retype_as_template(_make_pptx()), {"mime-type": mime}, {})
+    result = pptx_translator.translate(doc)
+    assert len(result) == 1
+    assert result[0].text.startswith("## Slide 1")
+
+
+def test_dispatch_routes_pptx_family() -> None:
+    """Dispatch routes deck/template/slideshow presentation mimes to Pptx."""
+    data = _make_pptx()
+    for mime in (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.openxmlformats-officedocument.presentationml.template",
+        "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+    ):
+        doc = Document("pp", [], data, {"mime-type": mime}, {})
+        parts = dispatch.translate(doc)
+        assert len(parts) == 1
+        assert parts[0].debug_info == "Dispatched to Pptx"
+        assert parts[0].text.startswith("## Slide 1")
+
+
 def _make_zip() -> bytes:
     """Build an in-memory .zip: a text file, a nested dir, and a directory entry."""
     import zipfile
@@ -386,7 +491,7 @@ def test_dispatch_ignored_mime_yields_nothing() -> None:
 # --- discovery -----------------------------------------------------------
 def test_discovery() -> None:
     """Built-in translators are discoverable; unknown names raise."""
-    assert {"dispatch", "email", "text", "pdf", "archive"} <= set(list_translators())
+    assert {"dispatch", "email", "text", "pdf", "archive", "pptx"} <= set(list_translators())
     assert load_translator("text") is text_translator
     with pytest.raises(TranslatorError):
         load_translator("does-not-exist")
