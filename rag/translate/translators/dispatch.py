@@ -51,28 +51,42 @@ _TEXT_TYPES: frozenset[str] = frozenset(
 )
 
 # Word OOXML mime types handled by the `docx` translator (document + template).
+# The macro-enabled variants (.docm/.dotm) are the same wordprocessingml package
+# with an added vbaProject.bin that mammoth ignores, so they route here too.
 _DOCX_TYPES: frozenset[str] = frozenset(
     {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.template",
+        "application/vnd.ms-word.document.macroenabled.12",
+        "application/vnd.ms-word.template.macroenabled.12",
     }
 )
 
 # Excel OOXML mime types handled by the `xlsx` translator (workbook + template).
+# The macro-enabled variants (.xlsm/.xltm) are the same spreadsheetml package with
+# an added VBA project that openpyxl ignores. The binary .xlsb (a different, non-XML
+# format openpyxl cannot read) is deliberately left out.
 _XLSX_TYPES: frozenset[str] = frozenset(
     {
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.template",
+        "application/vnd.ms-excel.sheet.macroenabled.12",
+        "application/vnd.ms-excel.template.macroenabled.12",
     }
 )
 
 # PowerPoint OOXML mime types handled by the `pptx` translator: the presentation
-# family — deck (.pptx), template (.potx) and slideshow (.ppsx).
+# family — deck (.pptx), template (.potx) and slideshow (.ppsx), plus the
+# macro-enabled variants (.pptm/.potm/.ppsm). The macro-enabled decks also carry a
+# distinct main content type inside the package; `pptx._as_deck` normalises it.
 _PPTX_TYPES: frozenset[str] = frozenset(
     {
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "application/vnd.openxmlformats-officedocument.presentationml.template",
         "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+        "application/vnd.ms-powerpoint.presentation.macroenabled.12",
+        "application/vnd.ms-powerpoint.template.macroenabled.12",
+        "application/vnd.ms-powerpoint.slideshow.macroenabled.12",
     }
 )
 

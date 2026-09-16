@@ -1,6 +1,7 @@
 """The ``pptx`` translator (PLAN §5.4).
 
-Converts a PowerPoint OOXML presentation (``.pptx``/``.potx``/``.ppsx``) to
+Converts a PowerPoint OOXML presentation (``.pptx``/``.potx``/``.ppsx`` and the
+macro-enabled ``.pptm``/``.potm``/``.ppsm`` variants) to
 Markdown using the ``python-pptx`` library: one ``## Slide N`` section per slide,
 gathering each slide's shape text (recursing into grouped shapes), any tables,
 and the speaker notes. Slides that carry no text at all are skipped, so numbering
@@ -20,39 +21,48 @@ from ..base import Document, Translation, Translator, make_translation
 
 # The content type declared for the *main* presentation part inside the OOXML
 # package's ``[Content_Types].xml``. python-pptx only accepts the deck spelling,
-# so a template (.potx) or slideshow (.ppsx) — structurally identical decks that
-# merely carry a different main content type — is rejected outright. We rewrite
-# the template/slideshow spelling to the deck spelling before opening.
+# so a template (.potx), slideshow (.ppsx) or any macro-enabled variant
+# (.pptm/.potm/.ppsm) — structurally identical decks that merely carry a different
+# main content type — is rejected outright. We rewrite the offending spelling to
+# the deck spelling before opening.
 _DECK_MAIN_CT: str = (
     "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
 )
-_TEMPLATE_MAIN_CT: str = (
-    "application/vnd.openxmlformats-officedocument.presentationml.template.main+xml"
-)
-_SLIDESHOW_MAIN_CT: str = (
-    "application/vnd.openxmlformats-officedocument.presentationml.slideshow.main+xml"
+# Every non-deck main content type we know how to normalise to a plain deck. The
+# first three are the OOXML template/slideshow spellings; the last three are the
+# macro-enabled family (note the ``ms-powerpoint`` namespace and the ``macroEnabled``
+# capitalisation used inside the package, which differs from the lower-cased mime
+# type libmagic reports). Rewriting the string in-place is enough — the parts these
+# types describe are byte-identical to a deck's for text-extraction purposes.
+_NON_DECK_MAIN_CTS: tuple[str, ...] = (
+    "application/vnd.openxmlformats-officedocument.presentationml.template.main+xml",
+    "application/vnd.openxmlformats-officedocument.presentationml.slideshow.main+xml",
+    "application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml",
+    "application/vnd.ms-powerpoint.template.macroEnabled.main+xml",
+    "application/vnd.ms-powerpoint.slideshow.macroEnabled.main+xml",
 )
 # The package part that maps part names to content types.
 _CONTENT_TYPES_PART: str = "[Content_Types].xml"
 
 
 def _as_deck(content: bytes) -> bytes:
-    """Return ``content`` with any template/slideshow main content type made a deck.
+    """Return ``content`` with any non-deck main content type made a deck.
 
-    python-pptx refuses to open a .potx/.ppsx because its main part is typed as a
-    template/slideshow rather than a presentation. The parts themselves are the
-    same, so we patch just the content-type declaration and re-pack the zip. A
-    genuine deck contains neither template nor slideshow spelling and is returned
-    unchanged (no re-zip).
+    python-pptx refuses to open a .potx/.ppsx/.pptm/… because its main part is
+    typed as a template/slideshow/macro-enabled presentation rather than a plain
+    presentation. The parts themselves are the same, so we patch just the
+    content-type declaration and re-pack the zip. A genuine deck contains none of
+    the non-deck spellings and is returned unchanged (no re-zip).
     """
     source = zipfile.ZipFile(io.BytesIO(content))
     content_types = source.read(_CONTENT_TYPES_PART).decode("utf-8")
-    # Nothing to do for an ordinary deck (or macro deck): leave the bytes as-is.
-    if _TEMPLATE_MAIN_CT not in content_types and _SLIDESHOW_MAIN_CT not in content_types:
+    # Nothing to do for an ordinary deck: leave the bytes as-is.
+    if not any(ct in content_types for ct in _NON_DECK_MAIN_CTS):
         return content
-    patched = content_types.replace(_TEMPLATE_MAIN_CT, _DECK_MAIN_CT).replace(
-        _SLIDESHOW_MAIN_CT, _DECK_MAIN_CT
-    )
+    # Rewrite each non-deck spelling present to the plain deck spelling.
+    patched = content_types
+    for ct in _NON_DECK_MAIN_CTS:
+        patched = patched.replace(ct, _DECK_MAIN_CT)
     out = io.BytesIO()
     # Rebuild the archive, swapping only the content-types part; every other
     # member is copied verbatim (preserving its per-entry compression).

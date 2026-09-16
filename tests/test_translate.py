@@ -132,11 +132,13 @@ def test_docx_translator_converts_to_markdown() -> None:
 
 
 def test_dispatch_routes_docx_and_dotx() -> None:
-    """Dispatch routes both the docx and dotx (template) mime types to Docx."""
+    """Dispatch routes docx, dotx (template) and macro-enabled (.docm/.dotm) to Docx."""
     body = "<w:p><w:r><w:t>plain para</w:t></w:r></w:p>"
     for mime in (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.template",
+        "application/vnd.ms-word.document.macroenabled.12",
+        "application/vnd.ms-word.template.macroenabled.12",
     ):
         doc = Document("d", [], _minimal_docx(body), {"mime-type": mime}, {})
         parts = dispatch.translate(doc)
@@ -182,13 +184,19 @@ def test_xlsx_translator_renders_markdown_tables() -> None:
 
 
 def test_dispatch_routes_xlsx() -> None:
-    """Dispatch routes the xlsx mime type to Xlsx."""
-    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    doc = Document("xl", [], _make_xlsx(), {"mime-type": mime}, {})
-    parts = dispatch.translate(doc)
-    assert len(parts) == 1
-    assert parts[0].debug_info == "Dispatched to Xlsx"
-    assert parts[0].text.startswith("## Sales")
+    """Dispatch routes xlsx, xltx (template) and macro-enabled (.xlsm/.xltm) to Xlsx."""
+    data = _make_xlsx()
+    for mime in (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.template",
+        "application/vnd.ms-excel.sheet.macroenabled.12",
+        "application/vnd.ms-excel.template.macroenabled.12",
+    ):
+        doc = Document("xl", [], data, {"mime-type": mime}, {})
+        parts = dispatch.translate(doc)
+        assert len(parts) == 1
+        assert parts[0].debug_info == "Dispatched to Xlsx"
+        assert parts[0].text.startswith("## Sales")
 
 
 def _make_pptx() -> bytes:
@@ -281,13 +289,50 @@ def test_pptx_translator_handles_template() -> None:
     assert result[0].text.startswith("## Slide 1")
 
 
+def _retype_as_macro(deck: bytes) -> bytes:
+    """Re-pack a .pptx deck as a macro-enabled .pptm (rewrite its main content type).
+
+    The macro-enabled presentation uses the ``ms-powerpoint`` namespace with the
+    ``macroEnabled`` spelling for its main part — another content type python-pptx
+    rejects — so this exercises the ``_as_deck`` normalisation for that variant.
+    """
+    import zipfile
+
+    deck_ct = (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
+    )
+    macro_ct = "application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml"
+    src = zipfile.ZipFile(io.BytesIO(deck))
+    ct = src.read("[Content_Types].xml").decode("utf-8").replace(deck_ct, macro_ct)
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            data = ct.encode("utf-8") if item.filename == "[Content_Types].xml" else src.read(item.filename)
+            dst.writestr(item, data)
+    return out.getvalue()
+
+
+def test_pptx_translator_handles_macro_enabled() -> None:
+    """A .pptm (macro-enabled content type) is normalised to a deck and translated."""
+    from rag.translate.translators.pptx import translator as pptx_translator
+
+    mime = "application/vnd.ms-powerpoint.presentation.macroenabled.12"
+    doc = Document("pm", [], _retype_as_macro(_make_pptx()), {"mime-type": mime}, {})
+    result = pptx_translator.translate(doc)
+    assert len(result) == 1
+    assert result[0].text.startswith("## Slide 1")
+
+
 def test_dispatch_routes_pptx_family() -> None:
-    """Dispatch routes deck/template/slideshow presentation mimes to Pptx."""
+    """Dispatch routes deck/template/slideshow + macro-enabled presentation mimes to Pptx."""
     data = _make_pptx()
     for mime in (
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "application/vnd.openxmlformats-officedocument.presentationml.template",
         "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+        "application/vnd.ms-powerpoint.presentation.macroenabled.12",
+        "application/vnd.ms-powerpoint.template.macroenabled.12",
+        "application/vnd.ms-powerpoint.slideshow.macroenabled.12",
     ):
         doc = Document("pp", [], data, {"mime-type": mime}, {})
         parts = dispatch.translate(doc)
