@@ -11,6 +11,7 @@ ZIP local-file header means OOXML, otherwise it is treated as legacy BIFF.
 from __future__ import annotations
 
 import io
+import warnings
 
 import openpyxl
 import xlrd
@@ -116,21 +117,36 @@ def _xlsx_sections(content: bytes) -> list[str]:
     """
     # read_only streams large sheets without loading them wholesale; data_only
     # returns the last cached value rather than the formula string.
-    workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
-    try:
-        sections: list[str] = []
-        for worksheet in workbook.worksheets:
-            rows = [
-                [_cell(value) for value in row]
-                for row in worksheet.iter_rows(values_only=True)
-            ]
-            section = _sheet_to_markdown(worksheet.title, rows)
-            if section is not None:
-                sections.append(section)
-        return sections
-    finally:
-        # read_only mode holds the underlying zip open until explicitly closed.
-        workbook.close()
+    # openpyxl warns (UserWarning) "Data Validation extension is not supported and
+    # will be removed" when a workbook carries the data-validation extension. We only
+    # read cell values, so that dropped feature is irrelevant — silence just this one
+    # message (matched by regex) so other, possibly non-benign openpyxl warnings still
+    # surface. In read_only mode sheet parsing is lazy (the warning fires during
+    # iter_rows, not the load), so the whole read must run inside the suppression.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Data Validation extension is not supported and will be removed",
+            category=UserWarning,
+            module="openpyxl",
+        )
+        workbook = openpyxl.load_workbook(
+            io.BytesIO(content), read_only=True, data_only=True
+        )
+        try:
+            sections: list[str] = []
+            for worksheet in workbook.worksheets:
+                rows = [
+                    [_cell(value) for value in row]
+                    for row in worksheet.iter_rows(values_only=True)
+                ]
+                section = _sheet_to_markdown(worksheet.title, rows)
+                if section is not None:
+                    sections.append(section)
+            return sections
+        finally:
+            # read_only mode holds the underlying zip open until explicitly closed.
+            workbook.close()
 
 
 def _xls_sections(content: bytes) -> list[str]:
