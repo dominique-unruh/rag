@@ -21,6 +21,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from ..blobs import BlobStore
+from ..config import Config
 from ..embed.backends import embed_texts
 from ..embed.chunk import chunk_text
 from ..embed.models import ModelSpec
@@ -104,19 +105,26 @@ def rrf_fuse(ranked_lists: Iterable[Sequence[ChunkKey]], k: int = _RRF_K) -> lis
 
 
 def _source_url(
-    source_type: str, doc_id: str, stable: dict[str, object], transient: dict[str, object]
+    config: Config,
+    source_type: str,
+    doc_id: str,
+    stable: dict[str, object],
+    transient: dict[str, object],
 ) -> str | None:
     """Ask the owning extractor for a link to the original document, or ``None``.
 
     Mirrors the db-browser: loads the plugin for ``source_type`` and calls its
-    ``source_url``. Any failure (unknown plugin, plugin error) degrades to no link
-    — a chat citation must never break because a plugin's URL logic raised.
+    ``source_url``, passing the plugin's live config subtree so path-derived links
+    stay current. Any failure (unknown plugin, plugin error) degrades to no link —
+    a chat citation must never break because a plugin's URL logic raised.
     """
     # Imported lazily to keep the module import light and avoid cycles.
     from ..extract.discovery import load_plugin
 
     try:
-        return load_plugin(source_type)().source_url(doc_id, stable, transient)
+        return load_plugin(source_type)().source_url(
+            doc_id, stable, transient, config.plugin_config(source_type)
+        )
     except Exception:
         return None
 
@@ -143,12 +151,15 @@ class Retriever:
         conn: sqlite3.Connection,
         blobs: BlobStore,
         *,
+        config: Config,
         chunk_size: int,
         overlap: int,
         secrets: Secrets,
         verbose: bool = False,
     ) -> None:
         """Bind the retriever to its stores and the embed pass's chunk parameters."""
+        # Full config — needed so source links reflect the live folder paths/modes.
+        self._config: Config = config
         # The open vector store (server or embedded-local) to search.
         self._vectors: VectorStore = vectors
         # Metadata connection, for part blob hashes and document titles/dates.
@@ -231,7 +242,7 @@ class Retriever:
                 # Decode the metadata blobs and ask the plugin for a source link.
                 stable = json.loads(row["stable"]) if row["stable"] else {}
                 transient = json.loads(row["transient"]) if row["transient"] else {}
-                url = _source_url(source_type, doc_id, stable, transient)
+                url = _source_url(self._config, source_type, doc_id, stable, transient)
                 self._doc_meta[key] = (row["title"], row["date"], url)
         return self._doc_meta[key]
 

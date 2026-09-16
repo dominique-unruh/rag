@@ -165,3 +165,109 @@ def test_unknown_option_rejected(doc_store: SqliteStore, tmp_path: Path) -> None
 
     with pytest.raises(PluginError):
         _run(doc_store, root, limit="1")
+
+
+def _doc_config(root: Path, sourcelink: str | None = None) -> dict[str, object]:
+    """A documents plugin config subtree for folder ``main`` rooted at ``root``."""
+    folder: dict[str, object] = {"folder-id": "main", "path": str(root)}
+    if sourcelink is not None:
+        folder["sourcelink"] = sourcelink
+    return {"folders": [folder]}
+
+
+def _url_for(store: SqliteStore, doc_id: str, config: dict[str, object]) -> str | None:
+    """Return the extractor's ``source_url`` for a stored document under ``config``.
+
+    Links are computed live from ``config`` at call time (never stored at ingest),
+    so the config passed here — not whatever was used to ingest — drives the result.
+    """
+    stable = store.get_metadata(doc_id) or {}
+    transient = store.get_transient(doc_id) or {}
+    return DocumentsExtractor().source_url(doc_id, stable, transient, config)
+
+
+def test_sourcelink_local(doc_store: SqliteStore, tmp_path: Path) -> None:
+    """``local`` mode yields a file: URL to the file's absolute path."""
+    root = tmp_path / "vault"
+    root.mkdir()
+    (root / "note.md").write_text("hi")
+    _run(doc_store, root)
+
+    expected = (root / "note.md").as_uri()
+    # Nothing baked into stored metadata — the link is derived at query time.
+    assert "source_link" not in (doc_store.get_transient("main:note.md") or {})
+    assert "source_link" not in (doc_store.get_metadata("main:note.md") or {})
+    url = _url_for(doc_store, "main:note.md", _doc_config(root, "local"))
+    assert url == expected
+    assert url.startswith("file://")
+
+
+def test_sourcelink_obsidian(doc_store: SqliteStore, tmp_path: Path) -> None:
+    """``obsidian`` mode yields an obsidian:// URL keyed by vault name + rel path."""
+    root = tmp_path / "My Vault"
+    (root / "sub").mkdir(parents=True)
+    (root / "sub" / "a note.md").write_text("hi")
+    _run(doc_store, root)
+
+    # Vault name is the root basename; both components are percent-encoded.
+    url = _url_for(doc_store, "main:sub/a note.md", _doc_config(root, "obsidian"))
+    assert url == "obsidian://open?vault=My%20Vault&file=sub/a%20note.md"
+
+
+def test_sourcelink_metadata_prefers_sidecar_url(doc_store: SqliteStore, tmp_path: Path) -> None:
+    """``metadata`` mode returns the sidecar url when present."""
+    root = tmp_path / "vault"
+    root.mkdir()
+    (root / "doc.bin").write_bytes(b"x")
+    (root / "doc.bin.metadata.json").write_text(json.dumps({"url": "https://x/y"}))
+    _run(doc_store, root)
+
+    assert _url_for(doc_store, "main:doc.bin", _doc_config(root, "metadata")) == "https://x/y"
+
+
+def test_sourcelink_metadata_falls_back_to_local(doc_store: SqliteStore, tmp_path: Path) -> None:
+    """``metadata`` mode with no sidecar url falls back to a local file: URL."""
+    root = tmp_path / "vault"
+    root.mkdir()
+    (root / "note.md").write_text("hi")
+    _run(doc_store, root)
+
+    url = _url_for(doc_store, "main:note.md", _doc_config(root, "metadata"))
+    assert url == (root / "note.md").as_uri()
+
+
+def test_sourcelink_default_is_metadata(doc_store: SqliteStore, tmp_path: Path) -> None:
+    """An unset sourcelink defaults to metadata (sidecar url, else local)."""
+    root = tmp_path / "vault"
+    root.mkdir()
+    (root / "note.md").write_text("hi")
+    _run(doc_store, root)
+
+    url = _url_for(doc_store, "main:note.md", _doc_config(root))  # no sourcelink key
+    assert url == (root / "note.md").as_uri()
+
+
+def test_sourcelink_reflects_moved_path(doc_store: SqliteStore, tmp_path: Path) -> None:
+    """A link is computed from the live config, so a moved root changes the URL."""
+    root = tmp_path / "vault"
+    root.mkdir()
+    (root / "note.md").write_text("hi")
+    _run(doc_store, root)
+
+    # Same stored document, but config now points the folder at a different path:
+    # the local file: URL must follow the new path (nothing was frozen at ingest).
+    moved = tmp_path / "moved-vault"
+    url = _url_for(doc_store, "main:note.md", _doc_config(moved, "local"))
+    assert url == (moved / "note.md").as_uri()
+
+
+def test_sourcelink_invalid_rejected(doc_store: SqliteStore, tmp_path: Path) -> None:
+    """An unknown sourcelink mode is a loud configuration error."""
+    root = tmp_path / "vault"
+    root.mkdir()
+    (root / "note.md").write_text("hi")
+    config = _doc_config(root, "bogus")
+    from rag.errors import ConfigError
+
+    with pytest.raises(ConfigError):
+        DocumentsExtractor().run(doc_store, root / ".state", config, Secrets())

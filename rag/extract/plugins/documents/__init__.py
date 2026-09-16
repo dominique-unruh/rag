@@ -18,6 +18,14 @@ Change detection is cheap by default: a file is re-read only when its (effective
 mtime differs from the one recorded on the last run. ``full=true`` forces a
 re-read of every file (the framework's :meth:`Store.upsert` still decides whether
 the bytes/metadata actually changed).
+
+Each folder may set ``sourcelink`` to choose how a document's source link (the
+URL :meth:`Extractor.source_url` returns) is generated: ``metadata`` (default —
+the sidecar ``url``, falling back to a local ``file:`` URL), ``local`` (always a
+``file:`` URL to the absolute path) or ``obsidian`` (an ``obsidian://`` URL that
+opens the file in Obsidian, treating the folder ``path`` as the vault root). The
+link is computed on demand from the live config (never baked in at ingest), so
+changing the folder ``path`` or the mode takes effect immediately.
 """
 
 from __future__ import annotations
@@ -30,6 +38,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from ....errors import ConfigError, PluginError
 from ....interrupt import interrupt_requested
@@ -45,6 +54,16 @@ _DEFAULT_MAX_FILE_SIZE: int = 100 * 1024 * 1024  # 100 MiB
 # Suffix identifying a per-file metadata sidecar (same convention as the RWTH
 # intranet scraper: ``<file>.metadata.json`` next to ``<file>``).
 _SIDECAR_SUFFIX: str = ".metadata.json"
+
+# How a folder's per-document source link is generated (the folder's optional
+# ``sourcelink`` config key). ``metadata`` extracts the link from the file's
+# sidecar (``url`` field), falling back to ``local`` when the sidecar has none;
+# ``local`` produces a ``file:`` URL to the file's absolute path; ``obsidian``
+# produces an ``obsidian://`` URL that opens the file in Obsidian, treating the
+# folder's configured ``path`` as the vault root. ``metadata`` is the default (it
+# preserves the historical behaviour of reading a sidecar ``url``).
+_SOURCELINK_MODES: tuple[str, ...] = ("metadata", "local", "obsidian")
+_DEFAULT_SOURCELINK: str = "metadata"
 
 # Basename glob patterns skipped by default: hidden files/dirs (``.*`` covers an
 # Obsidian vault's ``.obsidian/``), editor backups and transient temp files. The
@@ -77,7 +96,8 @@ def _folders_from_config(config: Mapping[str, Any]) -> list[Mapping[str, Any]]:
 
     Requires a non-empty ``folders`` list, each entry a mapping with a non-empty
     ``folder-id`` and ``path``. Folder-ids must be unique (they prefix doc-ids),
-    so a duplicate is a configuration error.
+    so a duplicate is a configuration error. An optional ``sourcelink`` must, if
+    present, be one of :data:`_SOURCELINK_MODES`.
     """
     folders = config.get("folders")
     if not isinstance(folders, list) or not folders:
@@ -90,7 +110,30 @@ def _folders_from_config(config: Mapping[str, Any]) -> list[Mapping[str, Any]]:
         if folder_id in seen:
             raise ConfigError(f"duplicate documents folder-id {folder_id!r}")
         seen.add(folder_id)
+        # An explicit sourcelink must name a known mode; a typo must fail loudly.
+        sourcelink = folder.get("sourcelink")
+        if sourcelink is not None and str(sourcelink).strip().lower() not in _SOURCELINK_MODES:
+            raise ConfigError(
+                f"documents folder {folder_id!r} has invalid sourcelink "
+                f"{sourcelink!r}; expected one of {', '.join(_SOURCELINK_MODES)}"
+            )
     return folders
+
+
+def _folder_by_id(config: Mapping[str, Any], folder_id: str) -> Mapping[str, Any] | None:
+    """Return the folder config entry with the given ``folder-id``, or ``None``.
+
+    Used by :meth:`DocumentsExtractor.source_url` to resolve a document's folder
+    (and thus its live root path + ``sourcelink`` mode) at query time. Tolerant of
+    a missing/misshaped ``folders`` list — a link is best-effort, never fatal.
+    """
+    folders = config.get("folders")
+    if not isinstance(folders, list):
+        return None
+    for folder in folders:
+        if isinstance(folder, Mapping) and str(folder.get("folder-id")) == folder_id and folder.get("path"):
+            return folder
+    return None
 
 
 def _sniff_mime(
@@ -184,19 +227,82 @@ def _effective_mtime(file_path: Path, sidecar_path: Path) -> str:
     return format_timestamp(datetime.fromtimestamp(newest, tz=timezone.utc))
 
 
+def _source_link(mode: str, root: Path, rel_posix: str, metadata_url: str | None) -> str | None:
+    """Build a document's source link for the folder's ``sourcelink`` mode.
+
+    * ``local`` — a ``file:`` URL to the file's absolute path (percent-encoded).
+    * ``obsidian`` — an ``obsidian://open`` URL that opens the file in Obsidian,
+      taking ``root`` as the vault (its basename is the vault name) and the file's
+      path relative to the root as the in-vault target.
+    * ``metadata`` — ``metadata_url`` (the sidecar-derived ``url``) verbatim,
+      falling back to a ``local`` ``file:`` URL when there is none.
+
+    ``root`` (the folder's configured absolute path) and ``mode`` are read live
+    from config at call time, so moving the storage or changing the mode takes
+    effect immediately — nothing is baked in at ingest. Returns ``None`` only for
+    an unrecognised ``mode`` (validation should prevent that).
+    """
+    if mode == "obsidian":
+        # Obsidian's URI scheme: vault=<vault name>, file=<path within the vault>.
+        # The vault name is the root directory's basename; the file is the path
+        # relative to that root. Both components are percent-encoded (safe="" so
+        # even slashes in the vault name, though unlikely, are escaped).
+        vault = quote(root.name, safe="")
+        return f"obsidian://open?vault={vault}&file={quote(rel_posix)}"
+    # For both `local` and the `metadata` fallback we need the file: URL to the
+    # absolute path. as_uri() requires an absolute path and percent-encodes it.
+    file_url = (root / rel_posix).as_uri()
+    if mode == "local":
+        return file_url
+    if mode == "metadata":
+        # Prefer the metadata (sidecar) url; otherwise fall back to the local URL.
+        if metadata_url is not None and metadata_url.strip():
+            return metadata_url.strip()
+        return file_url
+    return None
+
+
 class DocumentsExtractor(Extractor):
     """Extractor that syncs one or more on-disk folders into the store."""
 
     def source_url(
-        self, doc_id: str, stable: Mapping[str, Any], transient: Mapping[str, Any]
+        self,
+        doc_id: str,
+        stable: Mapping[str, Any],
+        transient: Mapping[str, Any],
+        config: Mapping[str, Any],
     ) -> str | None:
-        """Return a link to the original source, if the sidecar carried one.
+        """Return the document's source link, honouring the folder's ``sourcelink``.
 
-        Scraper-mirror documents keep the source ``url`` in their (sidecar-derived)
-        stable metadata; plain files have none, so this returns ``None``.
+        Computed live from ``config`` (the documents plugin subtree), not baked in
+        at ingest — so a changed folder ``path`` or ``sourcelink`` mode takes effect
+        immediately. The document's folder-id (from transient ``folder``, or the
+        ``doc_id`` prefix) selects the folder entry; its ``path`` is the root and
+        its ``sourcelink`` the mode. The file's in-folder path comes from stable
+        ``path`` (or the ``doc_id`` suffix), and the ``metadata`` mode's url from
+        stable ``url``. Falls back to the stable ``url`` (else ``None``) if the
+        folder is no longer configured.
         """
-        url = stable.get("url")
-        return url if isinstance(url, str) and url else None
+        # The doc_id is "<folder-id>:<relative-path>"; transient carries the same
+        # folder-id explicitly. Prefer the explicit field, fall back to the prefix.
+        folder_id = transient.get("folder")
+        if not isinstance(folder_id, str) or not folder_id:
+            folder_id = doc_id.split(":", 1)[0]
+        rel_posix = stable.get("path")
+        if not isinstance(rel_posix, str) or not rel_posix:
+            rel_posix = doc_id.split(":", 1)[1] if ":" in doc_id else doc_id
+
+        folder = _folder_by_id(config, folder_id)
+        metadata_url = stable.get("url")
+        metadata_url = metadata_url if isinstance(metadata_url, str) else None
+        if folder is not None:
+            root = Path(str(folder["path"])).expanduser()
+            mode = str(folder.get("sourcelink") or _DEFAULT_SOURCELINK).strip().lower()
+            link = _source_link(mode, root, rel_posix, metadata_url)
+            if link is not None:
+                return link
+        # Folder gone from config (renamed/removed): best-effort sidecar url.
+        return metadata_url if metadata_url else None
 
     def shortname(self, store: Store, doc_id: str, max_length: int | None = None) -> str:
         """Return a human-readable label: the sidecar title, else the file name.

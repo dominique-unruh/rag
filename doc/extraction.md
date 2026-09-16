@@ -279,6 +279,13 @@ plugin-wide settings. Each folder:
 - `folder-id` — short, stable string; used in doc-ids. Must be unique.
 - `description` — human-readable, for human consumption only.
 - `path` — the directory to walk (recursively). `~` is expanded.
+- `sourcelink` (optional) — how this folder's documents produce a source link
+  (the URL `source_url` returns): `metadata` (default — the sidecar `url`, else a
+  local `file:` URL), `local` (always a `file:` URL to the absolute path) or
+  `obsidian` (an `obsidian://open` URL opening the file in Obsidian, with the
+  folder `path` taken as the vault root). The link is computed on demand from the
+  live config — never frozen at ingest — so moving a folder `path` or changing the
+  mode takes effect immediately.
 
 Plugin-wide: `max_file_size` (per-file byte cap, default 100 MiB) and `exclude`
 (extra basename globs, **added to** the built-in defaults). See

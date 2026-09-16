@@ -155,12 +155,20 @@ class Extractor(ABC):
         """
 
     def source_url(
-        self, doc_id: str, stable: Mapping[str, Any], transient: Mapping[str, Any]
+        self,
+        doc_id: str,
+        stable: Mapping[str, Any],
+        transient: Mapping[str, Any],
+        config: Mapping[str, Any],
     ) -> str | None:
         """Return a URL linking to the original source of a document, or ``None``.
 
-        Given a document's id and its stable/transient metadata, produce a URL
-        that opens the original item (e.g. the message in a mail client). The
+        Given a document's id, its stable/transient metadata and the plugin's own
+        config subtree (``config``, the same mapping passed to :meth:`run`),
+        produce a URL that opens the original item (e.g. the message in a mail
+        client, or a ``file:``/``obsidian://`` link for an on-disk document).
+        ``config`` is supplied so the link can reflect the *current* configuration
+        (e.g. a moved storage path) rather than anything captured at ingest. The
         default is ``None`` (no link); plugins override when a meaningful URL
         exists. Not abstract — a plugin may legitimately have no source URL.
         """

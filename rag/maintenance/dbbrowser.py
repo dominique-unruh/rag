@@ -210,18 +210,25 @@ def _display_row(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _source_url(
-    source_type: str, doc_id: str, stable: dict[str, Any], transient: dict[str, Any]
+    config: Config,
+    source_type: str,
+    doc_id: str,
+    stable: dict[str, Any],
+    transient: dict[str, Any],
 ) -> str | None:
     """Ask the owning extractor for a source URL for this document, or ``None``.
 
-    Loads the plugin for ``source_type`` and calls its ``source_url``; any
-    failure (unknown plugin, plugin error) degrades gracefully to no link.
+    Loads the plugin for ``source_type`` and calls its ``source_url``, passing the
+    plugin's live config subtree so path-derived links stay current; any failure
+    (unknown plugin, plugin error) degrades gracefully to no link.
     """
     # Imported lazily to keep the module import light and avoid cycles.
     from ..extract.discovery import load_plugin
 
     try:
-        return load_plugin(source_type)().source_url(doc_id, stable, transient)
+        return load_plugin(source_type)().source_url(
+            doc_id, stable, transient, config.plugin_config(source_type)
+        )
     except Exception:
         # A browser must never break because a plugin's URL logic raised.
         return None
@@ -380,7 +387,7 @@ def _create_app(database: IdleDatabase, blobs: BlobStore, config: Config) -> Fla
                 "stable": stable,
                 "transient": transient,
                 # Link to the original source, if the owning extractor provides one.
-                "source_url": _source_url(row["source_type"], row["doc_id"], stable, transient),
+                "source_url": _source_url(config, row["source_type"], row["doc_id"], stable, transient),
                 "translations": [
                     {
                         "id": t["id"],
@@ -516,7 +523,7 @@ def _create_app(database: IdleDatabase, blobs: BlobStore, config: Config) -> Fla
             body = f"<h1>Translation error</h1><pre>{_h(str(exc))}</pre>"
             return Response(f"<!doctype html><meta charset=utf-8>{body}",
                             mimetype="text/html", status=500)
-        source_url = _source_url(row["source_type"], row["doc_id"], stable, transient)
+        source_url = _source_url(config, row["source_type"], row["doc_id"], stable, transient)
         html = _translation_page_html(
             row["source_type"], row["doc_id"], translator_name, source_url, translations
         )

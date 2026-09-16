@@ -174,7 +174,7 @@ def test_source_url() -> None:
     from rag.extract.plugins.email import EmailExtractor
 
     url = EmailExtractor().source_url(
-        "abc@example.org", {"title": "Hi there", "sender": "A <a@x>"}, {}
+        "abc@example.org", {"title": "Hi there", "sender": "A <a@x>"}, {}, {}
     )
     # Base + fragment, message-id percent-encoded, fields appended.
     assert url.startswith("https://qis.rwth-aachen.de/people/unruh/tools/mail-link/#")
@@ -182,7 +182,7 @@ def test_source_url() -> None:
     assert "subject=Hi+there" in url
     assert "from=A+%3Ca%40x%3E" in url
     # Empty metadata -> just the encoded message-id in the fragment.
-    bare = EmailExtractor().source_url("m@x", {}, {})
+    bare = EmailExtractor().source_url("m@x", {}, {}, {})
     assert bare.endswith("#m%40x")
 
 

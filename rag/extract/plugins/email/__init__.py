@@ -267,13 +267,19 @@ class EmailExtractor(Extractor):
     """Extractor that syncs one or more IMAP accounts into the store."""
 
     def source_url(
-        self, doc_id: str, stable: Mapping[str, Any], transient: Mapping[str, Any]
+        self,
+        doc_id: str,
+        stable: Mapping[str, Any],
+        transient: Mapping[str, Any],
+        config: Mapping[str, Any],
     ) -> str | None:
         """Return a mail-link URL for the message.
 
         Format: ``<base>#<message-id>(&field=value)*`` with each component
         percent-encoded UTF-8 (spaces as ``+``). The ``doc_id`` is the Message-ID;
-        the fragment also carries subject/date/from/to when available. See
+        the fragment also carries subject/date/from/to when available. ``config``
+        (the plugin's config subtree) is unused — the link is fully determined by
+        the message metadata. See
         https://github.com/dominique-unruh/mail-link/wiki/Mail-link-format
         """
         # The message-id heads the fragment (fully percent-encoded).

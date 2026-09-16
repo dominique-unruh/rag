@@ -202,7 +202,8 @@ def run_chat_simple(
     blobs = BlobStore(storage / _BLOBS_SUBDIR)
     retriever = Retriever(
         vectors, database.conn, blobs,
-        chunk_size=chunk_size, overlap=overlap, secrets=resolver, verbose=verbose,
+        config=config, chunk_size=chunk_size, overlap=overlap,
+        secrets=resolver, verbose=verbose,
     )
     readline_mod = _setup_readline(history_path)
 

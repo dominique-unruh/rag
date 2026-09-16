@@ -13,9 +13,11 @@
 A `folders` list plus two optional plugin-wide keys (see
 [extraction.md](extraction.md) for behaviour):
 
-- `folders` — one entry per on-disk folder, each `{folder-id, path, description}`.
-  `folder-id` is short, stable and unique (it prefixes doc-ids); `path` is the
-  directory to walk (`~` expanded).
+- `folders` — one entry per on-disk folder, each `{folder-id, path, description}`
+  plus an optional `sourcelink`. `folder-id` is short, stable and unique (it
+  prefixes doc-ids); `path` is the directory to walk (`~` expanded). `sourcelink`
+  (`metadata` (default) / `local` / `obsidian`) selects how the folder's documents
+  produce their `source_url` link — see [extraction.md](extraction.md).
 - `max_file_size` — optional per-file byte cap; files above it are skipped with an
   error. Default 100 MiB.
 - `exclude` — optional list of extra basename globs, **added to** the built-in
