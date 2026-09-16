@@ -55,6 +55,52 @@ under `extract/plugins/`, `source_type` = directory name):
 
 ---
 
+## Translation — media transcription translator (not built; deferred until GPU)
+
+Audio/video → text as a **translator** (module 2), a sibling of `pdf`/`docx`/`xlsx`
+— **not** a new extractor (the `documents` plugin already ingests media files as
+blobs with `audio/*`/`video/*` mime). **Deferred until a GPU is available**: local
+Whisper + a vision model are too slow on the current CPU-only box. See the
+GPU-arrival reminder in auto-memory.
+
+**Scope.** Two layers, merged into one timestamped Markdown transcript:
+1. **Audio → text** — Whisper (via `faster-whisper`), multilingual (DE/EN).
+2. **Visual → text** — for video, sample scene-change keyframes and describe them
+   with a vision-LLM; plus OCR (tesseract) for screencasts/slides (on-screen text).
+   Essential for speechless videos, where the visual track *is* the content.
+
+**Reuse existing OSS — do not hand-roll** frame sampling / scene-dedup / whisper:
+- `HUANGCHIHHUNGLeo/claude-real-video` (`crv`, MIT, library-importable) — scene-aware
+  deduplicated keyframes + real timestamps + local `faster-whisper` transcript. It
+  does *not* describe visuals itself. **Preferred building block.**
+- `byjlw/video-analyzer` (Apache-2.0) — turnkey: keyframes → Llama 3.2 Vision +
+  Whisper → combined description (`analysis.json`). GPU-oriented; least code but
+  least control. Fallback if we want turnkey.
+- General recipe everywhere: ffmpeg frames → open VLM (Qwen2.5-VL / MiniCPM-V /
+  InternVL / llava / llama3.2-vision) + Whisper. (`pyVideoTrans` = subtitles/dubbing,
+  not visual description — not relevant.)
+
+**Recommended shape.** `translators/transcribe.py` (`Transcribe`): `crv` for
+keyframes+transcript → run deduped frames through **Ollama vision** → merge to
+`[hh:mm:ss] (speech|visual|on-screen) …` Markdown. Dispatch routes
+`mime.startswith("audio/")`/`"video/"` **before** the text fallback. Store detected
+language + duration in part metadata.
+
+**Blocker to resolve first — translator config plumbing.** Translators today are
+stateless module-level instances that receive **no config** (`translate(document)`
+only; `pdf.py` etc. take nothing). Whisper/vision need config (model id, device,
+`compute_type`, language hint, frame cap). Cleanest: reuse the central `models:`
+registry (as `embed`/`chat` do) and have the pipeline pass the selected translator
+its config subtree (e.g. an optional `configure(config)` called after
+`load_translator`). This change is a prerequisite for this translator.
+
+**Guardrails.** Duration/size cap (skip huge files with an error, like the
+`documents` byte cap); scene-dedup + max-frames cap bounds vision cost; deps
+(`faster-whisper`, `crv`, vision via Ollama, optional `tesseract`) are hard —
+fail loud if missing (per project convention).
+
+---
+
 ## Maintenance — remaining tasks (not built)
 
 The `maintenance` dispatcher exists with `db-browser`, `delete` and `stats` (see
