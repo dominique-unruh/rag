@@ -101,6 +101,78 @@ fail loud if missing (per project convention).
 
 ---
 
+## Translation — image description + OCR translator (not built; deferred until GPU)
+
+Image (`image/png`, `image/jpeg`, `image/gif`, `image/webp`, `image/tiff`, …) →
+Markdown as a **translator** (module 2), a sibling of `pdf`/`docx`/`xlsx` — **not**
+a new extractor (the `documents` plugin already ingests images as blobs with
+`image/*` mime, and the `archive` translator already dispatches images pulled out
+of archives). Shares the **same GPU blocker and the same config-plumbing blocker**
+as the media-transcription translator above.
+
+**Scope.** Turn one image into indexable Markdown by combining two signals:
+1. **Visual description** — a vision-LLM (VLM) caption / scene understanding, so a
+   photo, diagram or screenshot with no embedded text still yields searchable prose
+   ("a whiteboard sketch of the extract→translate→embed pipeline with three boxes …").
+2. **OCR (on-screen text)** — the literal text in the image (scanned page,
+   screenshot, slide, photographed sign). Essential for screenshots/scans where the
+   text *is* the content.
+
+Merge both into one part: a `## Description` section from the VLM followed by a
+`## Text (OCR)` section, plus detected-language / dimensions in part metadata.
+
+**Key finding — the two layers can collapse into one VLM call.** Modern VLMs
+(Qwen3-VL, Qwen2.5-VL, MiniCPM-V) do *both* description **and** high-quality
+multilingual OCR in a single pass — so the primary path is one VLM prompt that
+returns "describe + transcribe". Standalone OCR is the **CPU-only fallback** (and a
+cheaper always-on layer) when no VLM is available. This mirrors how the video plan
+folds visual + on-screen text together, but here it is one model, not two tools.
+
+**Reuse existing OSS — do not hand-roll:**
+- **Vision via Ollama** (same transport as `embed`/`chat`): `qwen3-vl` /
+  `qwen2.5-vl:7b` (Jan 2025, strong multilingual OCR) or `minicpm-v` (best
+  character-level OCR for handwriting / odd fonts). **Preferred building block** —
+  it does description + OCR at once and reuses the existing OpenAI-compatible /
+  native-Ollama backend code. Local ⇒ needs a GPU (12 GB fits a 7–8B model at 4-bit).
+- **`Docling` (IBM, MIT)** — turnkey document-image pipeline: layout analysis +
+  TableFormer + EasyOCR, outputs structured Markdown, has LlamaIndex/LangChain RAG
+  hooks. Fallback turnkey option if we want layout/table fidelity (the
+  `video-analyzer` equivalent for images); heavier, GPU-oriented.
+- **CPU-only OCR fallback** — `tesseract` (via `pytesseract`, multilingual DE/EN) or
+  `PaddleOCR` (PP-OCR, better on complex layouts / non-Latin / curved text). Runs
+  today with no GPU; this is the layer that could ship *before* the GPU arrives.
+- Image decoding via `Pillow` (normalise/resize/convert before OCR or before base64
+  to the VLM).
+
+**GPU verdict (what the user asked to assess).** The **OCR half is CPU-only** and
+could ship now (tesseract/PaddleOCR). The **VLM-description half needs a GPU** to run
+locally, exactly like the video translator's vision layer — *or* a hosted
+OpenAI-compatible vision endpoint, which needs no local GPU but sends personal
+images to a third party (privacy) and costs per call. Because the user wants
+**both** description and OCR merged, the whole translator is **deferred until a GPU
+is available**, tracked with the media-transcription translator. (If we later want
+value sooner, ship the tesseract/PaddleOCR OCR-only layer first and add the VLM
+description layer when the GPU lands.)
+
+**Blocker to resolve first — translator config plumbing** (shared with the video
+translator; see that section). A VLM needs config (model id, endpoint, language
+hint, max image dimension); OCR needs a language hint and tesseract/Paddle path.
+Same fix: an optional `configure(config)` after `load_translator`, reusing the
+central `models:` registry.
+
+**Recommended shape.** `translators/image.py` (`Image`): decode with Pillow →
+if a VLM is configured, one "describe + transcribe" call; else CPU OCR only → emit
+`## Description` / `## Text (OCR)` Markdown. Dispatch routes
+`mime.startswith("image/")` **before** the text fallback (add an `_IMAGE_TYPES`
+route or a `startswith` check next to the `audio/`·`video/` one).
+
+**Guardrails.** Pixel/byte-size cap (downscale huge images before the VLM to bound
+cost/tokens, skip absurd ones with an error like the `documents` byte cap); deps
+(`Pillow`, `pytesseract`/`paddleocr`, vision via Ollama) are hard — fail loud if
+missing (per project convention).
+
+---
+
 ## Maintenance — remaining tasks (not built)
 
 The `maintenance` dispatcher exists with `db-browser`, `delete` and `stats` (see
