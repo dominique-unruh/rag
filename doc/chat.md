@@ -8,7 +8,7 @@ documents, searches the web) is still in [`../PLAN.md`](../PLAN.md).
 
 ```sh
 rag chat                                  # default chat model, all embedding indices
-rag chat --model qwen2.5-7b --top-k 12    # explicit model, more context
+rag chat --model gpt-oss-120b --top-k 12  # explicit model, more context
 rag chat --models qwen3-8b,bm25           # restrict which indices are queried
 rag chat -v                               # also print what was retrieved
 ```
@@ -36,8 +36,8 @@ For each question:
    embedding) is skipped.
 4. **Answer.** The chunks are formatted into a numbered context block and appended
    to the current user turn; the LLM is told to answer only from the context and
-   cite passages by number. The answer is **streamed** token-by-token (important on
-   a CPU-only box).
+   cite passages by number. The answer is **streamed** token-by-token, so long
+   answers show up as they are generated.
 
 Conversation history keeps only the plain question/answer turns — the retrieved
 context is attached to the *current* turn and not stored — so the context window
@@ -66,17 +66,17 @@ needed, is resolved through the keyring (`api_key_name`), never from the YAML.
 
 ```yaml
 models:
-  qwen2.5-7b:
-    backend: ollama           # or: openai
-    host: http://localhost:11434   # ollama; use api_base for an openai endpoint
-    model: qwen2.5:7b-instruct
-    num_ctx: 8192             # ollama context window (tokens)
+  qwen3.6-35b:
+    backend: openai           # or: ollama (then `host:` instead of `api_base:`)
+    api_base: https://ghost-in-the-shell.qis.rwth-aachen.de/v1
+    api_key_name: ai_server_api_key   # openai backend only; resolved via keyring
+    model: qwen3.6-35b-a3b    # the server's model name
     temperature: 0.2
-    timeout: 600              # generous — CPU generation is slow
-    # api_key_name: <secret>  # openai backend only; resolved via keyring
+    timeout: 600
+    # num_ctx: 8192           # ollama backend only: context window (tokens)
 
 chat:
-  default_model: qwen2.5-7b     # id from `models:`; used when --model is omitted
+  default_model: qwen3.6-35b    # id from `models:`; used when --model is omitted
   retrieval:
     top_k: 8                    # chunks fed to the model per turn (override: --top-k)
 ```
@@ -84,11 +84,11 @@ chat:
 `--model` can name **any** id in `models:` (parsed as a chat model — a non-chat
 backend like `bm25` is rejected).
 
-**Local CPU default.** On a CPU-only box with 32 GB RAM, a 7B instruct model (e.g.
-`qwen2.5:7b-instruct`, ~5 GB at Q4, multilingual for DE/EN mail) runs comfortably
-and reuses the Ollama server the embedder already uses. Pull it once with
-`ollama pull qwen2.5:7b-instruct`. Swap to a larger model once better hardware is
-available.
+**Current setup.** Chat and the dense embedder both use the group's AI server
+(`ghost-in-the-shell.qis.rwth-aachen.de`, OpenAI-compatible, API key in the
+keyring as `ai_server_api_key`). The default chat model is `qwen3.6-35b-a3b`
+(id `qwen3.6-35b`), the server's default for chat and email. `gpt-oss-120b` is the
+largest model there; pick it with `--model gpt-oss-120b`.
 
 ## REPL
 

@@ -5,17 +5,13 @@
 RAG        := ./rag-cli
 LIMIT      ?= 10
 SINCE      ?= 2026-04-01
-OLLAMA_URL ?= http://localhost:11434
-# Cap concurrent request contexts to 1: single-user serial embedding never needs
-# more, and each extra context multiplies peak RAM (guards against swap).
-OLLAMA_NUM_PARALLEL ?= 1
 # Config file the helper targets read (storage dir, vector-store URL) via yq.
 CONFIG     ?= config.yaml
 # Container image + name for the local Qdrant server target.
 QDRANT_IMAGE ?= qdrant/qdrant
 QDRANT_NAME  ?= rag-qdrant
 
-.PHONY: venv extract extract_full delete translate embed browse chat pipeline ollama qdrant-server qdrant-server-stop
+.PHONY: venv extract extract_full delete translate embed browse chat pipeline qdrant-server qdrant-server-stop
 
 ## Create the local dev venv (.venv) if missing, then install/sync the project +
 ## test dependencies into it via uv (https://astral.sh/uv). Safe to re-run after
@@ -55,18 +51,19 @@ delete:
 translate:
 	$(RAG) --verbose translate --limit $(LIMIT)
 
-## Embed up to LIMIT documents into MODEL's index (needs the Ollama server).
-embed: ollama qdrant-server
+## Embed up to LIMIT documents into MODEL's index (dense model served by the
+## AI server configured in $(CONFIG)).
+embed: qdrant-server
 	$(RAG) --verbose embed --model bm25 # --limit $(LIMIT)
 	$(RAG) --verbose embed --model qwen3-8b # --limit $(LIMIT)
 
 ## Launch the db-browser web UI.
-browse: ollama qdrant-server
+browse: qdrant-server
 	$(RAG) maintenance db-browser
 
-## Interactive chat over the RAG (simple mode). Needs the Ollama server (chat
+## Interactive chat over the RAG (simple mode). Needs the AI server (chat
 ## model) and, in server mode, the Qdrant server for retrieval.
-chat: ollama qdrant-server
+chat: qdrant-server
 	$(RAG) chat
 
 ## Run the full pipeline. Every stage runs even if an earlier one fails, but
@@ -78,19 +75,6 @@ pipeline:
 	$(MAKE) embed     || rc=1; \
 	exit $$rc
 
-
-## Ensure an Ollama server is reachable; start one in the background if not.
-ollama:
-	@curl -sf $(OLLAMA_URL)/api/tags >/dev/null 2>&1 || { \
-	  echo "Ollama not reachable at $(OLLAMA_URL); starting 'ollama serve'..."; \
-	  setsid env OLLAMA_NUM_PARALLEL=$(OLLAMA_NUM_PARALLEL) ollama serve >/tmp/ollama-serve.log 2>&1 </dev/null & \
-	  for i in $$(seq 1 30); do \
-	    curl -sf $(OLLAMA_URL)/api/tags >/dev/null 2>&1 && break; \
-	    sleep 1; \
-	  done; \
-	  curl -sf $(OLLAMA_URL)/api/tags >/dev/null 2>&1 || { \
-	    echo "error: Ollama did not come up (see /tmp/ollama-serve.log)"; exit 1; }; \
-	}
 
 ## Start a local Qdrant server (Docker) with an API key, data under the configured
 ## storage dir. Reads storage.dir + vector_store.url from $(CONFIG) via the Python
